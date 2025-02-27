@@ -1,0 +1,140 @@
+project: 급여관리시스템
+version: 1.0.0
+description: 근태기록 기반 급여 계산 및 관리 시스템
+
+structure:
+  frontend:
+    pages:
+      payroll:
+        - PayrollManagement.js:  # 메인 페이지
+            features:
+              - 급여 지급관리
+              - 임금 관리 및 분석 (2단계)
+              - 추가 기능 (향후 확장)
+        - PayrollPayment.js:     # 급여 지급관리 페이지
+            components:
+              - 급여 계산 기간 선택
+              - 직원 목록 및 선택
+              - 급여 계산 실행
+              - 급여 명세서 미리보기
+              - 이메일 발송 관리
+        - PayrollAnalysis.js:    # 급여 분석 페이지 (2단계)
+    
+    components:
+      - GlobalTabs.js
+      - PayrollCalculator.js
+      - PayslipPreview.js
+      - EmailSender.js
+
+  backend:
+    data:
+      input:
+        - employees.csv:    # 직원 정보
+            columns:
+              - employee_id
+              - name
+              - department
+              - position
+              - join_date
+              - birth
+              - sex
+              - base_salary
+              - status
+              - resignation_date
+              - family_count
+              - num_children
+              - children_ages
+
+        - attendance.csv:   # 근태 기록
+            columns:
+              - employee_id
+              - date
+              - check_in
+              - check_out
+              - attendance_type
+
+      output:
+        - payroll.csv:      # 급여 지급 내역
+            columns:
+              - payment_id
+              - employee_id
+              - payment_date
+              - base_salary
+              - position_allowance
+              - overtime_pay
+              - night_shift_pay
+              - holiday_pay
+              - meal_allowance
+              - transportation_allowance
+              - bonus
+              - gross_salary
+              - national_pension
+              - health_insurance
+              - long_term_care
+              - employment_insurance
+              - income_tax
+              - local_income_tax
+              - net_salary
+
+    calculators:
+      - salary_calculator.py:    # 급여 계산 로직
+          classes:
+            - OvertimeCalculator:
+                methods:
+                  - calculate_overtime_pay
+                  - calculate_night_shift_pay
+                  - calculate_holiday_pay
+                  - calculate_total_overtime_pay
+
+      - generate_payment_data.py:  # 급여 데이터 생성
+          classes:
+            - PayrollGenerator:
+                methods:
+                  - generate_payroll
+                  - _load_employees
+                  - _load_attendance_data
+                  - _create_monthly_record
+
+features:
+  급여_지급관리:
+    - 데이터_수집:
+        - employees.csv 데이터 로드
+        - attendance.csv 데이터 로드
+    - 급여_계산:
+        - 기본급 계산
+        - 수당 계산 (연장/야간/휴일)
+        - 4대보험 공제
+        - 세금 공제
+    - 급여명세서:
+        - PDF 생성
+        - 이메일 발송
+    - 데이터_저장:
+        - payroll.csv 업데이트
+
+  급여_분석: # 2단계
+    - 기간별_분석
+    - 부서별_분석
+    - 직급별_분석
+    - 통계_리포트
+
+개발_단계:
+  1단계:
+    - 급여 지급관리 페이지 개발
+    - 급여 계산 로직 구현
+    - 급여 명세서 생성 및 발송
+    - payroll.csv 생성 및 관리
+
+  2단계:
+    - 급여 분석 페이지 개발
+    - 데이터 시각화
+    - 분석 리포트 생성
+
+기술_스택:
+  frontend:
+    - React
+    - Material-UI
+    - Chart.js
+  backend:
+    - Python
+    - Pandas
+    - NumPy

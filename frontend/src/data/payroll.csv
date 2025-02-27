@@ -1,0 +1,3 @@
+employee_id,name,department,position,base_salary,position_allowance,overtime_pay,night_shift_pay,holiday_pay,meal_allowance,transportation_allowance,bonus,gross_salary,national_pension,health_insurance,long_term_care,employment_insurance,income_tax,local_income_tax,net_salary,payment_date
+E001,홍길동,개발,대리,3000000,100000,200000,100000,150000,100000,50000,0,3700000,120000,80000,10000,20000,150000,15000,3305000,2024-03-15
+E002,김철수,개발,과장,4000000,150000,300000,0,200000,100000,50000,0,4800000,150000,100000,15000,25000,200000,20000,4290000,2024-03-15

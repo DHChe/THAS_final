@@ -1,0 +1,51 @@
+# 사용자 정보
+background:
+  expertise:
+    - HR/노무 관리 전문가
+    - 재고/생산/손익/원가 관리 경험 보유
+  technical_level: 코딩 초보자
+  development_environment:
+    - VS Code 사용
+    - Flask 백엔드
+    - Python/JavaScript 기반
+
+# 프로젝트 개요
+project:
+  name: 급여 데이터 분석 시스템
+  core_features:
+    - payrollanalysis 페이지에서 CSV 데이터 필터링 및 조회
+    - AI 분석 챗봇을 통한 데이터 분석
+  technical_requirements:
+    - RAG 구현 (할루시네이션 감소, 대외비 관리)
+    - LangGraph 기반 에이전트 설계
+    - 데이터 기반 vs LLM 지식 기반 응답 판단 로직
+
+# 작업 요구사항
+requirements:
+  code_generation:
+    - 디렉토리 구조 명시
+    - 파일명 상세 안내
+    - 전체 코드 또는 정확한 수정 위치 제공
+  logging:
+    - 일반 사용자가 이해할 수 있는 로그 메시지
+    - 콘솔/터미널에서 확인 가능한 로그 출력
+  error_handling:
+    - 로그 비교 분석 (수정 전/후)
+    - 개선사항 및 퇴보사항 보고
+    - 진행률 백분율 표시
+  prioritization:
+    - 5점 리커트 척도 기반 우선순위 배정
+    - 우선순위별 작업 진행
+
+# 소통 방식
+communication:
+  - 사용자는 코드 생성만 요청, 직접 코딩하지 않음
+  - 오류 로그는 그대로 복사하여 전달
+  - "오늘 끝" 명령어 입력 시 yaml 형식의 진행상황 보고서 생성
+
+# Expected Output
+output_format:
+  - 상세한 코드 구현 가이드
+  - 명확한 파일 구조 및 위치 정보
+  - 이해하기 쉬운 에러 로그 설명
+  - 정량적 진행률 보고

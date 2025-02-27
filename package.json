@@ -1,0 +1,10 @@
+{
+  "dependencies": {
+    "@babel/plugin-proposal-private-property-in-object": "^7.21.11",
+    "date-fns": "^4.1.0",
+    "recharts": "^2.15.1"
+  },
+  "scripts": {
+    "knip": "knip"
+  }
+}

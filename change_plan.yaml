@@ -1,0 +1,118 @@
+# RAG 시스템 설계 변경 명세서
+
+## 1. 변경 배경
+현재 설계:
+  - 사용자 필터링 결과를 다시 가공하여 LLM에 전달
+  - 불필요한 데이터 처리 단계 존재
+  - 이미 임베딩된 데이터를 효율적으로 활용하지 못함
+
+변경 필요성:
+  - 시스템 효율성 향상
+  - 처리 단계 간소화
+  - 기존 벡터 스토어 활용 극대화
+
+## 2. 설계 변경 사항
+
+### 2.1 데이터 흐름 변경
+기존:
+  - 사용자 필터링 → 테이블 데이터 → 데이터 가공 → LLM 전달
+변경:
+  - 사용자 필터링 조건 → RAG 시스템 → LLM 전달
+
+### 2.2 컴포넌트별 변경사항
+
+PayrollAnalysis.js:
+  - 필터 조건 객체 구조화
+  - AI 분석 요청 시 필터 조건 전달 방식 변경
+  ```javascript
+  {
+    filters: {
+      period: string,
+      department: string,
+      position: string,
+      // 기타 필터 조건
+    },
+    question: string
+  }
+  ```
+
+ragSystem.js:
+  - 필터 조건 기반 컨텍스트 검색 로직 추가
+  - 벡터 스토어 쿼리 최적화
+  ```javascript
+  class RAGSystem {
+    async analyze(filterConditions, question) {
+      const context = await this.getContextFromFilters(filterConditions);
+      return await this.generateResponse(question, context);
+    }
+  }
+  ```
+
+vectorStoreManager.js:
+  - 필터 조건 기반 검색 기능 강화
+  - 메타데이터 필터링 최적화
+
+### 2.3 인터페이스 변경
+API 엔드포인트:
+  ```typescript
+  interface AnalysisRequest {
+    filters: {
+      period?: string;
+      department?: string;
+      position?: string;
+      [key: string]: string;
+    };
+    question: string;
+  }
+  ```
+
+## 3. 구현 우선순위
+
+1. 필터 조건 처리 로직 구현 (우선순위: 5/5)
+   - 필터 조건 객체 구조화
+   - 메타데이터 매핑 구현
+
+2. RAG 시스템 수정 (우선순위: 5/5)
+   - 필터 기반 컨텍스트 검색 구현
+   - 응답 생성 로직 수정
+
+3. 벡터 스토어 쿼리 최적화 (우선순위: 4/5)
+   - 필터 조건 기반 검색 개선
+   - 성능 최적화
+
+4. 테스트 프레임워크 수정 (우선순위: 4/5)
+   - 새로운 구조에 맞는 테스트 케이스 작성
+   - 성능 측정 지표 추가
+
+## 4. 기대 효과
+
+성능 향상:
+  - 불필요한 데이터 처리 제거
+  - 벡터 스토어 활용 효율화
+
+시스템 안정성:
+  - 데이터 일관성 향상
+  - 오류 가능성 감소
+
+유지보수성:
+  - 코드 복잡도 감소
+  - 시스템 구조 단순화
+
+## 5. 검증 계획
+
+테스트 항목:
+  - 필터 조건 처리 정확성
+  - 응답 생성 속도
+  - 메모리 사용량
+  - 응답 정확도
+
+성공 기준:
+  - 응답 시간 20% 이상 감소
+  - 메모리 사용량 30% 이상 감소
+  - 응답 정확도 98% 이상 유지
+
+## 6. 마이그레이션 계획
+
+1단계: 개발 환경 구현 및 테스트
+2단계: 스테이징 환경 검증
+3단계: 프로덕션 롤아웃

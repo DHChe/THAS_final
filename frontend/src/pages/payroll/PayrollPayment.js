@@ -12,40 +12,82 @@ import {
   DialogTitle,
   DialogContent,
   DialogActions,
+  ButtonGroup,
 } from '@mui/material';
 import { DatePicker } from '@mui/x-date-pickers';
-import { AdapterDateFns } from '@mui/x-date-pickers/AdapterDateFns';
+import { AdapterDayjs } from '@mui/x-date-pickers/AdapterDayjs';
 import { LocalizationProvider } from '@mui/x-date-pickers/LocalizationProvider';
-import { ko } from 'date-fns/locale';
+import 'dayjs/locale/ko'; // 한국어 로케일 임포트
+import dayjs from 'dayjs';
 import GlobalTabs from '../../components/GlobalTabs';
 import EmployeeSelector from '../../components/payroll/EmployeeSelector';
 import PayrollTable from '../../components/payroll/PayrollTable';
 import PayrollSummary from '../../components/payroll/PayrollSummary';
 import DevMemo from '../../components/payroll/DevMemo';
 import { useEmployees } from '../../context/EmployeeContext';
-import { format, addDays, lastDayOfMonth, differenceInDays, isValid } from 'date-fns'; // isValid 추가
 import { StyledPaper, StyledButton } from '../../components/StyledComponents';
 import { ThemeProvider } from '@mui/material/styles';
 import theme from '../../styles/theme';
 import commonStyles from '../../styles/styles';
 
+// dayjs 플러그인 설정
+import isSameOrBefore from 'dayjs/plugin/isSameOrBefore';
+import isSameOrAfter from 'dayjs/plugin/isSameOrAfter';
+import customParseFormat from 'dayjs/plugin/customParseFormat';
+
+dayjs.extend(isSameOrBefore);
+dayjs.extend(isSameOrAfter);
+dayjs.extend(customParseFormat);
+
 // 최대 종료일 계산 함수
 const getMaxEndDate = (startDate) => {
   if (!startDate) return null;
-  const lastDay = lastDayOfMonth(startDate);
-  const daysInMonth = differenceInDays(lastDay, startDate);
-  return addDays(startDate, daysInMonth);
+  const lastDay = startDate.endOf('month');
+  return lastDay;
+};
+
+// 빠른 기간 선택 옵션 상수
+const QUICK_PERIODS = {
+  CURRENT_MONTH: 'current',
+  PREVIOUS_MONTH: 'previous',
+  NEXT_MONTH: 'next',
+  CUSTOM: 'custom'
+};
+
+// *** 날짜 선택기 UI 설정 - 필요에 따라 값을 조정하세요 ***
+const DATE_PICKER_UI = {
+  POPUP_WIDTH: '355px',       // 날짜 선택 팝업 창 너비 - 이 값을 조정하여 가로 길이를 변경하세요
+  YEAR_BUTTON_WIDTH: '100px', // 연도 선택 버튼 너비
+  MONTH_BUTTON_WIDTH: '100px', // 월 선택 버튼 너비
+  DAY_BUTTON_SIZE: '36px'     // 일 선택 버튼 크기
 };
 
 const PayrollPayment = () => {
   const { employees, loading: employeesLoading, error } = useEmployees();
   const [selectedEmployees, setSelectedEmployees] = useState([]);
-  const [selectedPeriod, setSelectedPeriod] = useState({ start: null, end: null });
+  const [selectedPeriod, setSelectedPeriod] = useState({ 
+    start: null, 
+    end: null, 
+    type: QUICK_PERIODS.CUSTOM 
+  });
   const [payrollData, setPayrollData] = useState(null);
   const [calculating, setCalculating] = useState(false);
   const [alert, setAlert] = useState({ open: false, message: '', severity: 'info' });
   const [attendanceData, setAttendanceData] = useState([]);
   const [calculationResults, setCalculationResults] = useState([]);
+
+  // 컴포넌트 마운트 시 기본값 설정
+  useEffect(() => {
+    // 현재 월의 첫날과 마지막 날로 기본 설정
+    const now = dayjs();
+    const firstDay = now.startOf('month');
+    const lastDay = now.endOf('month');
+    setSelectedPeriod({ 
+      start: firstDay, 
+      end: lastDay, 
+      type: QUICK_PERIODS.CURRENT_MONTH 
+    });
+  }, []);
 
   useEffect(() => {
     const fetchAttendance = async () => {
@@ -66,10 +108,20 @@ const PayrollPayment = () => {
     fetchAttendance();
   }, []);
 
-  // 기간 변경 핸들러 (키보드 입력 검증 강화)
+  // 기간 변경 핸들러 (임시 업데이트용)
   const handlePeriodChange = (type, date) => {
-    // 유효하지 않은 날짜인지 확인 (예: 잘못된 형식 또는 존재하지 않는 날짜)
-    if (date && !isValid(date)) {
+    // 임시 날짜 업데이트 (유효성 검사 없이)
+    if (type === 'start') {
+      setSelectedPeriod(prev => ({ ...prev, start: date, type: QUICK_PERIODS.CUSTOM }));
+    } else if (type === 'end') {
+      setSelectedPeriod(prev => ({ ...prev, end: date, type: QUICK_PERIODS.CUSTOM }));
+    }
+  };
+  
+  // 날짜 선택 완료 시 유효성 검사 (최종 선택 시)
+  const handleDateAccept = (type, date) => {
+    // 유효하지 않은 날짜인지 확인 (isValid 플러그인 없이도 동작)
+    if (!date || !dayjs(date).isValid()) {
       setAlert({ open: true, message: '유효하지 않은 날짜 형식입니다.', severity: 'warning' });
       return;
     }
@@ -77,29 +129,53 @@ const PayrollPayment = () => {
     if (type === 'start') {
       if (selectedPeriod.end) {
         const maxEndDate = getMaxEndDate(date);
-        if (selectedPeriod.end > maxEndDate) {
+        if (selectedPeriod.end.isAfter(maxEndDate)) {
           setAlert({ open: true, message: '종료일은 시작일이 속한 월의 마지막 날을 초과할 수 없습니다.', severity: 'warning' });
-          setSelectedPeriod({ start: date, end: null }); // 종료일 초기화
-          return;
+          setSelectedPeriod(prev => ({ ...prev, end: null })); // 종료일만 초기화
         }
       }
-      setSelectedPeriod(prev => ({ ...prev, start: date }));
     } else if (type === 'end') {
       if (!selectedPeriod.start) {
         setAlert({ open: true, message: '먼저 시작일을 선택해주세요.', severity: 'warning' });
         return;
       }
-      if (date < selectedPeriod.start) {
+      if (date.isBefore(selectedPeriod.start)) {
         setAlert({ open: true, message: '종료일은 시작일 이후여야 합니다.', severity: 'warning' });
+        setSelectedPeriod(prev => ({ ...prev, end: null })); // 종료일만 초기화
         return;
       }
       const maxEndDate = getMaxEndDate(selectedPeriod.start);
-      if (date > maxEndDate) {
+      if (date.isAfter(maxEndDate)) {
         setAlert({ open: true, message: '종료일은 시작일이 속한 월의 마지막 날을 초과할 수 없습니다.', severity: 'warning' });
+        setSelectedPeriod(prev => ({ ...prev, end: maxEndDate })); // 최대 가능한 종료일로 설정
         return;
       }
-      setSelectedPeriod(prev => ({ ...prev, end: date }));
     }
+  };
+
+  // 빠른 기간 선택 핸들러
+  const handleQuickPeriodSelect = (periodType) => {
+    const now = dayjs();
+    let start, end;
+
+    switch (periodType) {
+      case QUICK_PERIODS.CURRENT_MONTH:
+        start = now.startOf('month');
+        end = now.endOf('month');
+        break;
+      case QUICK_PERIODS.PREVIOUS_MONTH:
+        start = now.subtract(1, 'month').startOf('month');
+        end = now.subtract(1, 'month').endOf('month');
+        break;
+      case QUICK_PERIODS.NEXT_MONTH:
+        start = now.add(1, 'month').startOf('month');
+        end = now.add(1, 'month').endOf('month');
+        break;
+      default:
+        return; // CUSTOM의 경우 아무것도 하지 않음
+    }
+
+    setSelectedPeriod({ start, end, type: periodType });
   };
 
   const handleEmployeeSelection = (selectedIds) => {
@@ -112,8 +188,8 @@ const PayrollPayment = () => {
       return;
     }
 
-    // 날짜 유효성 추가 검증
-    if (!isValid(selectedPeriod.start) || !isValid(selectedPeriod.end)) {
+    // 날짜 유효성 추가 검증 (isValid 플러그인 없이도 동작)
+    if (!dayjs(selectedPeriod.start).isValid() || !dayjs(selectedPeriod.end).isValid()) {
       setAlert({ open: true, message: '선택한 날짜가 유효하지 않습니다.', severity: 'error' });
       return;
     }
@@ -121,8 +197,8 @@ const PayrollPayment = () => {
     setCalculating(true);
     try {
       const payload = {
-        start_date: format(selectedPeriod.start, 'yyyy-MM-dd'),
-        end_date: format(selectedPeriod.end, 'yyyy-MM-dd'),
+        start_date: selectedPeriod.start.format('YYYY-MM-DD'),
+        end_date: selectedPeriod.end.format('YYYY-MM-DD'),
         employee_ids: selectedEmployees,
         attendance_data: attendanceData
       };
@@ -140,6 +216,43 @@ const PayrollPayment = () => {
       setAlert({ open: true, message: '급여 계산 완료', severity: 'success' });
     } catch (err) {
       setAlert({ open: true, message: `계산 오류: ${err.message}`, severity: 'error' });
+    } finally {
+      setCalculating(false);
+    }
+  };
+
+  // 급여 명세서 생성 및 이메일 발송 핸들러
+  const handleSendPayslips = async () => {
+    if (calculationResults.length === 0) {
+      setAlert({ open: true, message: '먼저 급여를 계산해주세요.', severity: 'warning' });
+      return;
+    }
+
+    setCalculating(true);
+    try {
+      // 백엔드 API 호출 (아직 구현되지 않음)
+      const response = await fetch('http://localhost:5000/api/payroll/send-payslips', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ 
+          payroll_data: calculationResults,
+          period: {
+            start: selectedPeriod.start.format('YYYY-MM-DD'),
+            end: selectedPeriod.end.format('YYYY-MM-DD')
+          }
+        })
+      });
+      
+      if (!response.ok) {
+        const errorData = await response.json();
+        throw new Error(errorData.error || '급여명세서 발송 실패');
+      }
+      
+      setAlert({ open: true, message: '급여명세서가 성공적으로 발송되었습니다.', severity: 'success' });
+    } catch (err) {
+      // 실제 구현 전에는 성공 메시지 표시 (시뮬레이션)
+      setAlert({ open: true, message: '급여명세서 발송 시뮬레이션 완료 (백엔드 미구현)', severity: 'info' });
+      console.error('급여명세서 발송 오류:', err);
     } finally {
       setCalculating(false);
     }
@@ -181,14 +294,134 @@ const PayrollPayment = () => {
             <Grid item xs={12} md={6}>
               <StyledPaper sx={{ p: 3 }}>
                 <Typography variant="h6" gutterBottom>급여 계산 기간</Typography>
-                <LocalizationProvider dateAdapter={AdapterDateFns} adapterLocale={ko}>
+                
+                {/* 빠른 기간 선택 버튼 그룹 */}
+                <Box sx={{ mb: 2 }}>
+                  <ButtonGroup variant="outlined" size="small" sx={{ mb: 1 }}>
+                    <Button 
+                      onClick={() => handleQuickPeriodSelect(QUICK_PERIODS.PREVIOUS_MONTH)}
+                      variant={selectedPeriod.type === QUICK_PERIODS.PREVIOUS_MONTH ? 'contained' : 'outlined'}
+                    >
+                      전월
+                    </Button>
+                    <Button 
+                      onClick={() => handleQuickPeriodSelect(QUICK_PERIODS.CURRENT_MONTH)}
+                      variant={selectedPeriod.type === QUICK_PERIODS.CURRENT_MONTH ? 'contained' : 'outlined'}
+                    >
+                      당월
+                    </Button>
+                    <Button 
+                      onClick={() => handleQuickPeriodSelect(QUICK_PERIODS.NEXT_MONTH)}
+                      variant={selectedPeriod.type === QUICK_PERIODS.NEXT_MONTH ? 'contained' : 'outlined'}
+                    >
+                      익월
+                    </Button>
+                  </ButtonGroup>
+                </Box>
+                
+                <LocalizationProvider dateAdapter={AdapterDayjs} adapterLocale="ko">
                   <Grid container spacing={2}>
                     <Grid item xs={6}>
                       <DatePicker
                         label="시작일"
                         value={selectedPeriod.start}
                         onChange={(date) => handlePeriodChange('start', date)}
-                        slotProps={{ textField: { fullWidth: true } }}
+                        onAccept={(date) => handleDateAccept('start', date)}
+                        openTo="year"
+                        views={['year', 'month', 'day']}
+                        disableOpenPicker={false}
+                        // 연도 범위 제한 (현재 연도가 마지막 값, 총 12개 표시)
+                        minDate={dayjs().subtract(11, 'year')}
+                        maxDate={dayjs()}
+                        slotProps={{ 
+                          textField: { 
+                            fullWidth: true,
+                            helperText: '월 단위 급여 계산의 시작일',
+                            InputProps: {
+                              readOnly: true // 직접 키보드로 입력 방지
+                            }
+                          },
+                          // 달력 팝업 창 스타일 조정
+                          desktopPaper: {
+                            sx: {
+                              width: DATE_PICKER_UI.POPUP_WIDTH, // 팝업 창 너비 변수 사용
+                              '& .MuiPickersDay-root': {
+                                width: DATE_PICKER_UI.DAY_BUTTON_SIZE,
+                                height: DATE_PICKER_UI.DAY_BUTTON_SIZE,
+                                fontSize: '0.875rem'
+                              },
+                              '& .MuiDayCalendar-header': {
+                                justifyContent: 'space-around'
+                              },
+                              '& .MuiPickersYear-yearButton': {
+                                width: DATE_PICKER_UI.YEAR_BUTTON_WIDTH,
+                                margin: '2px',
+                                fontSize: '0.875rem'
+                              },
+                              '& .MuiPickersMonth-monthButton': {
+                                width: DATE_PICKER_UI.MONTH_BUTTON_WIDTH,
+                                margin: '2px',
+                                fontSize: '0.875rem'
+                              },
+                              '& .MuiPickersCalendarHeader-root': {
+                                paddingLeft: '16px',
+                                paddingRight: '16px'
+                              },
+                              '& .MuiYearCalendar-root': {
+                                width: '100%',
+                                maxHeight: '280px',
+                                display: 'grid',
+                                gridTemplateColumns: 'repeat(3, 1fr)',
+                                justifyContent: 'center'
+                              },
+                              // 월/년 선택기 스타일 수정 (순서 조정)
+                              '& .MuiMonthCalendar-root': {
+                                marginTop: '8px',
+                                width: '100%'
+                              },
+                              // 다이얼로그 내부 순서 제어
+                              '& .MuiPickersLayout-contentWrapper': {
+                                '& > div:first-of-type': {
+                                  order: 0  // 연도 선택 패널을 첫 번째로
+                                },
+                                '& > div:nth-of-type(2)': {
+                                  order: 1  // 월 선택 패널을 두 번째로
+                                }
+                              }
+                            }
+                          },
+                          // 모바일 뷰도 동일하게 조정
+                          mobilePaper: {
+                            sx: {
+                              '& .MuiPickersYear-yearButton': {
+                                width: DATE_PICKER_UI.YEAR_BUTTON_WIDTH,
+                                margin: '2px',
+                                fontSize: '0.875rem'
+                              },
+                              '& .MuiYearCalendar-root': {
+                                maxHeight: '280px',
+                                display: 'grid',
+                                gridTemplateColumns: 'repeat(3, 1fr)'
+                              },
+                              // 월/년 선택기 스타일 수정 (순서 조정)
+                              '& .MuiPickersLayout-contentWrapper': {
+                                '& > div:first-of-type': {
+                                  order: 0  // 연도 선택 패널을 첫 번째로
+                                },
+                                '& > div:nth-of-type(2)': {
+                                  order: 1  // 월 선택 패널을 두 번째로
+                                }
+                              }
+                            }
+                          }
+                        }}
+                        yearCalendarProps={{
+                          autoFocus: true,
+                          defaultHighlight: dayjs().subtract(11, 'year')
+                        }}
+                        monthCalendarProps={{
+                          autoFocus: false
+                        }}
                       />
                     </Grid>
                     <Grid item xs={6}>
@@ -196,13 +429,115 @@ const PayrollPayment = () => {
                         label="종료일"
                         value={selectedPeriod.end}
                         onChange={(date) => handlePeriodChange('end', date)}
+                        onAccept={(date) => handleDateAccept('end', date)}
                         minDate={selectedPeriod.start}
                         maxDate={selectedPeriod.start ? getMaxEndDate(selectedPeriod.start) : null}
-                        slotProps={{ textField: { fullWidth: true } }}
+                        openTo="year"
+                        views={['year', 'month', 'day']}
+                        disableOpenPicker={false}
+                        // 연도 범위 제한 (현재 연도가 마지막 값, 총 12개 표시)
+                        slotProps={{ 
+                          textField: { 
+                            fullWidth: true,
+                            helperText: '월 단위 급여 계산의 종료일',
+                            InputProps: {
+                              readOnly: true // 직접 키보드로 입력 방지
+                            }
+                          },
+                          // 달력 팝업 창 스타일 조정
+                          desktopPaper: {
+                            sx: {
+                              width: DATE_PICKER_UI.POPUP_WIDTH, // 팝업 창 너비 변수 사용
+                              '& .MuiPickersDay-root': {
+                                width: DATE_PICKER_UI.DAY_BUTTON_SIZE,
+                                height: DATE_PICKER_UI.DAY_BUTTON_SIZE,
+                                fontSize: '0.875rem'
+                              },
+                              '& .MuiDayCalendar-header': {
+                                justifyContent: 'space-around'
+                              },
+                              '& .MuiPickersYear-yearButton': {
+                                width: DATE_PICKER_UI.YEAR_BUTTON_WIDTH,
+                                margin: '2px',
+                                fontSize: '0.875rem'
+                              },
+                              '& .MuiPickersMonth-monthButton': {
+                                width: DATE_PICKER_UI.MONTH_BUTTON_WIDTH,
+                                margin: '2px',
+                                fontSize: '0.875rem'
+                              },
+                              '& .MuiPickersCalendarHeader-root': {
+                                paddingLeft: '16px',
+                                paddingRight: '16px'
+                              },
+                              '& .MuiYearCalendar-root': {
+                                width: '100%',
+                                maxHeight: '280px',
+                                display: 'grid',
+                                gridTemplateColumns: 'repeat(3, 1fr)',
+                                justifyContent: 'center'
+                              },
+                              // 월/년 선택기 스타일 수정 (순서 조정)
+                              '& .MuiMonthCalendar-root': {
+                                marginTop: '8px',
+                                width: '100%'
+                              },
+                              // 다이얼로그 내부 순서 제어
+                              '& .MuiPickersLayout-contentWrapper': {
+                                '& > div:first-of-type': {
+                                  order: 0  // 연도 선택 패널을 첫 번째로
+                                },
+                                '& > div:nth-of-type(2)': {
+                                  order: 1  // 월 선택 패널을 두 번째로
+                                }
+                              }
+                            }
+                          },
+                          // 모바일 뷰도 동일하게 조정
+                          mobilePaper: {
+                            sx: {
+                              '& .MuiPickersYear-yearButton': {
+                                width: DATE_PICKER_UI.YEAR_BUTTON_WIDTH,
+                                margin: '2px',
+                                fontSize: '0.875rem'
+                              },
+                              '& .MuiYearCalendar-root': {
+                                maxHeight: '280px',
+                                display: 'grid',
+                                gridTemplateColumns: 'repeat(3, 1fr)'
+                              },
+                              // 월/년 선택기 스타일 수정 (순서 조정)
+                              '& .MuiPickersLayout-contentWrapper': {
+                                '& > div:first-of-type': {
+                                  order: 0  // 연도 선택 패널을 첫 번째로
+                                },
+                                '& > div:nth-of-type(2)': {
+                                  order: 1  // 월 선택 패널을 두 번째로
+                                }
+                              }
+                            }
+                          }
+                        }}
+                        yearCalendarProps={{
+                          autoFocus: true
+                        }}
+                        monthCalendarProps={{
+                          autoFocus: false
+                        }}
                       />
                     </Grid>
                   </Grid>
                 </LocalizationProvider>
+                
+                {/* 선택된 기간 정보 표시 */}
+                {selectedPeriod.start && selectedPeriod.end && (
+                  <Box sx={{ mt: 2, p: 1, bgcolor: 'rgba(0, 0, 0, 0.05)', borderRadius: 1 }}>
+                    <Typography variant="body2" color="text.secondary">
+                      선택 기간: {selectedPeriod.start.format('YYYY년 MM월 DD일')} ~ {selectedPeriod.end.format('YYYY년 MM월 DD일')}
+                      {' '}({selectedPeriod.end.diff(selectedPeriod.start, 'day') + 1}일)
+                    </Typography>
+                  </Box>
+                )}
               </StyledPaper>
             </Grid>
 
@@ -214,13 +549,31 @@ const PayrollPayment = () => {
               <StyledPaper>
                 <Box sx={{ display: 'flex', justifyContent: 'space-between', mb: 2 }}>
                   <Typography variant="h6">급여 계산 결과</Typography>
-                  <StyledButton
-                    variant="contained"
-                    onClick={handleCalculatePayroll}
-                    disabled={calculating}
-                  >
-                    {calculating ? <CircularProgress size={24} /> : '급여 계산'}
-                  </StyledButton>
+                  <Box sx={{ display: 'flex', gap: 2 }}>
+                    <StyledButton
+                      variant="contained"
+                      onClick={handleCalculatePayroll}
+                      disabled={calculating}
+                    >
+                      {calculating ? <CircularProgress size={24} /> : '급여 계산'}
+                    </StyledButton>
+                    
+                    {/* 급여명세서 발송 버튼 추가 */}
+                    <StyledButton
+                      variant="outlined"
+                      onClick={handleSendPayslips}
+                      disabled={calculating || calculationResults.length === 0}
+                      sx={{
+                        backgroundColor: 'white',
+                        color: theme.palette.primary.main,
+                        '&:hover': {
+                          backgroundColor: 'rgba(0, 0, 0, 0.05)',
+                        },
+                      }}
+                    >
+                      {calculating ? <CircularProgress size={24} /> : '급여명세서 발송'}
+                    </StyledButton>
+                  </Box>
                 </Box>
                 <PayrollSummary calculationResults={calculationResults} employees={employees} />
                 <PayrollTable calculationResults={calculationResults} employees={employees} />
@@ -239,7 +592,7 @@ const PayrollPayment = () => {
           aria-describedby="alert-dialog-description"
         >
           <DialogTitle id="alert-dialog-title">
-            {alert.severity === 'success' ? '성공' : '알림'}
+            {alert.severity === 'success' ? '성공' : alert.severity === 'error' ? '오류' : '알림'}
           </DialogTitle>
           <DialogContent>
             <Alert severity={alert.severity} sx={{ width: '100%' }}>

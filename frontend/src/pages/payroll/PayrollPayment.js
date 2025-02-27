@@ -21,6 +21,7 @@ import 'dayjs/locale/ko'; // 한국어 로케일 임포트
 import dayjs from 'dayjs';
 import GlobalTabs from '../../components/GlobalTabs';
 import EmployeeSelector from '../../components/payroll/EmployeeSelector';
+import EnhancedEmployeeSelector from '../../components/payroll/EnhancedEmployeeSelector';
 import PayrollTable from '../../components/payroll/PayrollTable';
 import PayrollSummary from '../../components/payroll/PayrollSummary';
 import DevMemo from '../../components/payroll/DevMemo';
@@ -39,11 +40,48 @@ dayjs.extend(isSameOrBefore);
 dayjs.extend(isSameOrAfter);
 dayjs.extend(customParseFormat);
 
-// 최대 종료일 계산 함수
+// 최대 종료일 계산 함수 - 수정됨
 const getMaxEndDate = (startDate) => {
   if (!startDate) return null;
-  const lastDay = startDate.endOf('month');
-  return lastDay;
+  
+  // 시작일이 월의 첫날인지 확인
+  if (startDate.date() === 1) {
+    // 월의 첫날이면 해당 월의 마지막 날까지
+    return startDate.endOf('month');
+  } else {
+    // 월의 첫날이 아니면 다음달 (시작일-1)일까지
+    // 예: 10월 5일 선택 -> 11월 4일까지
+    const nextMonth = startDate.add(1, 'month');
+    const dayOfMonth = startDate.date();
+    
+    // 종료일(다음 달의 해당 일자 하루 전)
+    let endDayOfMonth = dayOfMonth - 1;
+    if (endDayOfMonth === 0) {
+      // 만약 1일이 선택되었다면(다음 달 0일이 되는 경우) 전 달의 마지막 날로
+      return nextMonth.subtract(1, 'day').endOf('month');
+    }
+    
+    // 특별 케이스: 1월 29일인 경우 항상 2월 28일로 처리
+    if (startDate.month() === 0 && dayOfMonth === 29) {  // 0은 1월을 의미함
+      return nextMonth.date(28);
+    }
+    
+    // 특별한 처리: 시작일이 30, 31일인 경우
+    const daysInNextMonth = nextMonth.daysInMonth();
+    
+    // 시작일이 해당 월의 마지막 날짜 또는 그 이후 날짜인 경우 (예: 1월 30일, 31일)
+    // 다음 달의 마지막 날을 종료일로 설정
+    if (dayOfMonth >= 30 && endDayOfMonth > daysInNextMonth) {
+      return nextMonth.endOf('month');
+    }
+    
+    // 일반적인 경우: 다음 달에 해당 일이 없으면 마지막 날로 조정
+    if (endDayOfMonth > daysInNextMonth) {
+      endDayOfMonth = daysInNextMonth;
+    }
+    
+    return nextMonth.date(endDayOfMonth);
+  }
 };
 
 // 빠른 기간 선택 옵션 상수
@@ -130,9 +168,17 @@ const PayrollPayment = () => {
       if (selectedPeriod.end) {
         const maxEndDate = getMaxEndDate(date);
         if (selectedPeriod.end.isAfter(maxEndDate)) {
-          setAlert({ open: true, message: '종료일은 시작일이 속한 월의 마지막 날을 초과할 수 없습니다.', severity: 'warning' });
-          setSelectedPeriod(prev => ({ ...prev, end: null })); // 종료일만 초기화
+          setAlert({ 
+            open: true, 
+            message: '시작일에 따른 유효한 종료일로 조정되었습니다.', 
+            severity: 'info' 
+          });
+          setSelectedPeriod(prev => ({ ...prev, start: date, end: maxEndDate, type: QUICK_PERIODS.CUSTOM }));
+        } else {
+          setSelectedPeriod(prev => ({ ...prev, start: date, type: QUICK_PERIODS.CUSTOM }));
         }
+      } else {
+        setSelectedPeriod(prev => ({ ...prev, start: date, type: QUICK_PERIODS.CUSTOM }));
       }
     } else if (type === 'end') {
       if (!selectedPeriod.start) {
@@ -146,9 +192,14 @@ const PayrollPayment = () => {
       }
       const maxEndDate = getMaxEndDate(selectedPeriod.start);
       if (date.isAfter(maxEndDate)) {
-        setAlert({ open: true, message: '종료일은 시작일이 속한 월의 마지막 날을 초과할 수 없습니다.', severity: 'warning' });
-        setSelectedPeriod(prev => ({ ...prev, end: maxEndDate })); // 최대 가능한 종료일로 설정
-        return;
+        setAlert({ 
+          open: true, 
+          message: '시작일에 따른 최대 종료일로 조정되었습니다.', 
+          severity: 'info' 
+        });
+        setSelectedPeriod(prev => ({ ...prev, end: maxEndDate, type: QUICK_PERIODS.CUSTOM }));
+      } else {
+        setSelectedPeriod(prev => ({ ...prev, end: date, type: QUICK_PERIODS.CUSTOM }));
       }
     }
   };
@@ -292,7 +343,7 @@ const PayrollPayment = () => {
 
           <Grid container spacing={3}>
             <Grid item xs={12} md={6}>
-              <StyledPaper sx={{ p: 3 }}>
+              <StyledPaper sx={{ p: 3, height: '3' }}>
                 <Typography variant="h6" gutterBottom>급여 계산 기간</Typography>
                 
                 {/* 빠른 기간 선택 버튼 그룹 */}
@@ -542,7 +593,11 @@ const PayrollPayment = () => {
             </Grid>
 
             <Grid item xs={12} md={6}>
-              <EmployeeSelector selectedEmployees={selectedEmployees} onSelectionChange={handleEmployeeSelection} employees={employees} />
+              <EnhancedEmployeeSelector 
+              selectedEmployees={selectedEmployees} 
+              onSelectionChange={handleEmployeeSelection} 
+              employees={employees} 
+              />
             </Grid>
 
             <Grid item xs={12}>

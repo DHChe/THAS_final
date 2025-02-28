@@ -3,7 +3,7 @@ import pandas as pd
 import holidays
 
 # 급여 지급일 설정 (매월 25일로 가정)
-PAYROLL_DAY = 25  # *** 급여 지급일 설정 (변경 시 이 값을 수정하세요) ***
+PAYROLL_DAY = 1  # *** 급여 지급일 설정 (변경 시 이 값을 수정하세요) ***
 
 
 class PayCalculator:
@@ -63,8 +63,9 @@ class PayCalculator:
             return int(monthly_salary)
 
         # 중도 입사/퇴사 또는 부분 기간인 경우 일할 계산
-        # 월급여 ÷ 30 × 8 = 하루 통상임금
-        daily_wage = (monthly_salary / 30) * 8
+        # 올바른 계산: 월급여 ÷ 209 × 8 = 하루 통상임금
+        hourly_wage = monthly_salary / self.WORK_HOURS_PER_MONTH  # 시간당 임금
+        daily_wage = hourly_wage * 8  # 일급 (8시간 기준)
 
         # 실제 근무 기간 계산 (입사일/퇴사일 고려)
         if join_date or resignation_date:

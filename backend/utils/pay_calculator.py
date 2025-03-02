@@ -1,9 +1,13 @@
-from datetime import datetime, time
+from datetime import datetime, time, timedelta
 import pandas as pd
 import holidays
 
 # 급여 지급일 설정 (매월 1일 또는 25일 등으로 설정 가능)
 PAYROLL_DAY = 1  # *** 급여 지급일 설정 (변경 시 이 값을 수정하세요) ***
+
+# 소정근로시간 설정
+REGULAR_WORKDAY_START = 9  # 일반 근로일 근무 시작 시간 (09:00)
+REGULAR_WORKDAY_END = 18    # 일반 근로일 근무 종료 시간 (18:00)
 
 
 class PayCalculator:
@@ -132,36 +136,132 @@ class PayCalculator:
 
     def calculate_overtime_pay(self, attendance_data, hourly_rate):
         """
-        연장근로수당 계산 함수
+        연장근로수당 계산 함수 (개선됨)
 
-        일 8시간 초과 근무에 대해 시간당 임금의 1.5배 지급
+        - 소정근로시간(9시~18시) 이외의 시간에 대해 연장근로 계산
+        - 연속 근무 시 다음날이 근로일인 경우 해당일 09:00~18:00은 소정근로시간
+        - 휴일 근무의 경우 모든 시간을 연장근로로, 평일 근무는 소정근로시간 외 시간만 연장근로로 계산
         """
         total_overtime_pay = 0
+        
         for record in attendance_data:
-            work_hours = self._calculate_work_hours(
-                record["check_in"], record["check_out"], record["attendance_type"]
-            )
-            overtime_hours = max(0, work_hours - 8)
-            total_overtime_pay += overtime_hours * hourly_rate * 1.5
+            # 출퇴근 시간이 없으면 건너뛰기
+            if not record["check_in"] or not record["check_out"]:
+                continue
+            
+            check_in_dt = datetime.strptime(record["check_in"], "%Y-%m-%d %H:%M:%S")
+            check_out_dt = datetime.strptime(record["check_out"], "%Y-%m-%d %H:%M:%S")
+            
+            # 출근일이 휴일인지 확인
+            first_day_is_holiday = record["attendance_type"] == "휴일" or self._is_holiday(check_in_dt.strftime("%Y-%m-%d"))
+            
+            # 날짜가 바뀌는지 확인
+            if check_in_dt.date() != check_out_dt.date():
+                # ===== 첫째 날 처리 =====
+                if first_day_is_holiday:
+                    # 휴일인 경우 모든 시간이 연장근로
+                    first_day_end = datetime.combine(check_in_dt.date(), time(23, 59, 59))
+                    first_day_hours = (first_day_end - check_in_dt).total_seconds() / 3600
+                    
+                    # 9시간 이상 근무 시 휴게시간 1시간 제외
+                    if first_day_hours >= 9:
+                        first_day_hours -= 1
+                        
+                    total_overtime_pay += first_day_hours * hourly_rate * 1.5
+                else:
+                    # 평일인 경우 소정근로시간(9:00~18:00) 외 시간만 연장근로
+                    first_day_end = datetime.combine(check_in_dt.date(), time(23, 59, 59))
+                    workday_start = datetime.combine(check_in_dt.date(), time(REGULAR_WORKDAY_START, 0, 0))
+                    workday_end = datetime.combine(check_in_dt.date(), time(REGULAR_WORKDAY_END, 0, 0))
+                    
+                    # 09:00 이전 근무 시간 (연장근로)
+                    if check_in_dt < workday_start:
+                        early_hours = (workday_start - check_in_dt).total_seconds() / 3600
+                        total_overtime_pay += early_hours * hourly_rate * 1.5
+                    
+                    # 18:00 이후 근무 시간 (연장근로)
+                    late_hours = (first_day_end - workday_end).total_seconds() / 3600
+                    total_overtime_pay += late_hours * hourly_rate * 1.5
+                
+                # ===== 둘째 날부터 처리 =====
+                current_date = check_in_dt.date() + timedelta(days=1)
+                
+                while current_date <= check_out_dt.date():
+                    # 현재 날짜가 휴일인지 확인
+                    current_day_is_holiday = self._is_holiday(current_date.strftime("%Y-%m-%d"))
+                    
+                    # 해당 날짜의 시작과 종료 시간 설정
+                    if current_date == check_out_dt.date():
+                        # 마지막 날
+                        day_end = check_out_dt
+                    else:
+                        # 중간 날짜
+                        day_end = datetime.combine(current_date, time(23, 59, 59))
+                    
+                    day_start = datetime.combine(current_date, time(0, 0, 0))
+                    
+                    # 현재 날짜가 평일이고, 첫날이 평일인 경우 (연속 근무)
+                    if not current_day_is_holiday and not first_day_is_holiday:
+                        # 소정근로시간(09:00~18:00) 설정
+                        workday_start = datetime.combine(current_date, time(REGULAR_WORKDAY_START, 0, 0))
+                        workday_end = datetime.combine(current_date, time(REGULAR_WORKDAY_END, 0, 0))
+                        
+                        # 00:00부터 09:00까지 연장근로
+                        if day_start < workday_start:
+                            early_hours = min(
+                                (workday_start - day_start).total_seconds() / 3600,
+                                (min(workday_start, day_end) - day_start).total_seconds() / 3600
+                            )
+                            total_overtime_pay += early_hours * hourly_rate * 1.5
+                        
+                        # 18:00부터 퇴근시간까지 연장근로
+                        if day_end > workday_end:
+                            late_hours = (day_end - max(workday_end, day_start)).total_seconds() / 3600
+                            total_overtime_pay += late_hours * hourly_rate * 1.5
+                    else:
+                        # 현재 날짜가 휴일이거나, 첫날이 휴일인 경우
+                        # 모든 시간을 연장근로로 계산
+                        day_hours = (day_end - day_start).total_seconds() / 3600
+                        
+                        # 9시간 이상 근무 시 휴게시간 1시간 제외
+                        if day_hours >= 9:
+                            day_hours -= 1
+                            
+                        total_overtime_pay += day_hours * hourly_rate * 1.5
+                    
+                    # 다음 날로 이동
+                    current_date += timedelta(days=1)
+            else:
+                # ===== 같은 날 출퇴근인 경우 =====
+                if first_day_is_holiday:
+                    # 휴일인 경우 모든 시간이 연장근로
+                    total_hours = (check_out_dt - check_in_dt).total_seconds() / 3600
+                    
+                    # 9시간 이상 근무 시 휴게시간 1시간 제외
+                    if total_hours >= 9:
+                        total_hours -= 1
+                    
+                    total_overtime_pay += total_hours * hourly_rate * 1.5
+                else:
+                    # 평일인 경우 소정근로시간(9:00~18:00) 외 시간만 연장근로
+                    workday_start = datetime.combine(check_in_dt.date(), time(REGULAR_WORKDAY_START, 0, 0))
+                    workday_end = datetime.combine(check_in_dt.date(), time(REGULAR_WORKDAY_END, 0, 0))
+                    
+                    # 09:00 이전 근무 시간 (연장근로)
+                    if check_in_dt < workday_start:
+                        early_hours = (workday_start - check_in_dt).total_seconds() / 3600
+                        total_overtime_pay += early_hours * hourly_rate * 1.5
+                    
+                    # 18:00 이후 근무 시간 (연장근로)
+                    if check_out_dt > workday_end:
+                        late_hours = (check_out_dt - workday_end).total_seconds() / 3600
+                        total_overtime_pay += late_hours * hourly_rate * 1.5
+        
         return int(total_overtime_pay)
-
-    def calculate_night_pay(self, attendance_data, hourly_rate):
-        """
-        야간근로수당 계산 함수
-
-        22시부터 익일 6시까지의 근무에 대해 시간당 임금의 0.5배 추가 지급
-        """
-        total_night_pay = 0
-        for record in attendance_data:
-            night_hours = self._calculate_night_hours(
-                record["check_in"], record["check_out"]
-            )
-            total_night_pay += night_hours * hourly_rate * 0.5
-        return int(total_night_pay)
 
     def _calculate_work_hours(self, check_in, check_out, attendance_type):
         """
-        근무 시간 계산 함수
+        근무 시간 계산 함수 (변경 없음)
 
         출퇴근 시간으로부터 실제 근무 시간 계산 (휴게시간 1시간 제외)
         """
@@ -176,11 +276,53 @@ class PayCalculator:
             total_hours -= 1
         return total_hours
 
+    def calculate_night_pay(self, attendance_data, hourly_rate):
+        """
+        야간근로수당 계산 함수 (개선됨)
+
+        - 철야 근무의 경우 모든 날짜의 야간 시간(22시-06시)을 정확히 계산
+        - 야간근로는 근무일 여부와 상관없이 22:00~06:00 시간대 근무 시 적용
+        """
+        total_night_pay = 0
+        for record in attendance_data:
+            # 출퇴근 시간이 없으면 건너뛰기
+            if not record["check_in"] or not record["check_out"]:
+                continue
+                
+            check_in_dt = datetime.strptime(record["check_in"], "%Y-%m-%d %H:%M:%S")
+            check_out_dt = datetime.strptime(record["check_out"], "%Y-%m-%d %H:%M:%S")
+            
+            # 모든 날짜에 대한 야간 근무 계산
+            current_date = check_in_dt.date()
+            
+            while current_date <= check_out_dt.date():
+                # 현재 날짜의 야간 시간대 설정
+                night_start = datetime.combine(current_date, time(22, 0))
+                night_end = datetime.combine(current_date, time(6, 0)) + timedelta(days=1)
+                
+                # 실제 근무 시간과 야간 시간대의 교집합 계산
+                if check_out_dt <= night_start or check_in_dt >= night_end:
+                    # 야간 시간대와 겹치지 않음
+                    pass
+                else:
+                    # 야간 시간대와 겹치는 시간 계산
+                    start = max(check_in_dt, night_start)
+                    end = min(check_out_dt, night_end)
+                    
+                    if end > start:  # 유효한 겹침이 있는지 확인
+                        night_hours = (end - start).total_seconds() / 3600
+                        total_night_pay += night_hours * hourly_rate * 0.5
+                
+                # 다음 날로 이동
+                current_date += timedelta(days=1)
+                
+        return int(total_night_pay)
+
     def _calculate_night_hours(self, check_in, check_out):
         """
-        야간 근무 시간 계산 함수
-
-        22시부터 익일 6시까지의 근무 시간 계산
+        야간 근무 시간 계산 함수 (기존 함수 유지, 하위 호환성을 위해)
+        
+        신규 calculate_night_pay 함수에서는 이 함수를 직접 사용하지 않음
         """
         if not check_in or not check_out:
             return 0
@@ -206,23 +348,90 @@ class PayCalculator:
 
     def calculate_holiday_pay(self, attendance_data, hourly_rate):
         """
-        휴일근로수당 계산 함수
+        휴일근로수당 계산 함수 (개선됨)
 
-        휴일 8시간 이내 근무: 시간당 임금의 1.5배
-        휴일 8시간 초과 근무: 초과분에 대해 시간당 임금의 2.0배
+        - 휴일에 시작한 근로만 휴일근로수당 적용
+        - 휴일 8시간 이내: 시간당 임금의 1.5배
+        - 휴일 8시간 초과: 초과분에 대해 시간당 임금의 2.0배  
+        - 평일에 시작한 근로가 휴일로 이어지는 경우는 휴일근로수당 미적용
+        - 휴일에 시작한 근로가 평일로 이어지는 경우, 평일 09:00까지만 휴일근로수당 적용
         """
         total_holiday_pay = 0
+        
         for record in attendance_data:
-            if record["attendance_type"] == "휴일" or self._is_holiday(record["date"]):
-                work_hours = self._calculate_work_hours(
-                    record["check_in"], record["check_out"], record["attendance_type"]
-                )
-                if work_hours <= 8:
-                    total_holiday_pay += work_hours * hourly_rate * 1.5
+            if not record["check_in"] or not record["check_out"]:
+                continue
+                
+            check_in_dt = datetime.strptime(record["check_in"], "%Y-%m-%d %H:%M:%S")
+            check_out_dt = datetime.strptime(record["check_out"], "%Y-%m-%d %H:%M:%S")
+            
+            # 출근일이 휴일인지 확인
+            is_holiday_work = record["attendance_type"] == "휴일" or self._is_holiday(check_in_dt.strftime("%Y-%m-%d"))
+            
+            # 평일에 시작한 근로는 휴일근로수당 적용 안함
+            if not is_holiday_work:
+                continue
+            
+            # 이제부터 휴일에 시작한 근로만 처리
+            total_holiday_hours = 0  # 휴일근로 누적 시간 (8시간 기준 계산용)
+            current_date = check_in_dt.date()
+            
+            while current_date <= check_out_dt.date():
+                # 현재 날짜의 시작과 종료 시간 설정
+                if current_date == check_in_dt.date():
+                    # 첫째 날
+                    day_start = check_in_dt
                 else:
-                    total_holiday_pay += (8 * hourly_rate * 1.5) + (
-                        (work_hours - 8) * hourly_rate * 2.0
-                    )
+                    # 그 외 날짜
+                    day_start = datetime.combine(current_date, time(0, 0, 0))
+                
+                if current_date == check_out_dt.date():
+                    # 마지막 날
+                    day_end = check_out_dt
+                else:
+                    # 그 외 날짜
+                    day_end = datetime.combine(current_date, time(23, 59, 59))
+                
+                # 현재 날짜가 휴일이 아니고 평일인 경우, 09:00까지만 계산
+                if current_date != check_in_dt.date() and not self._is_holiday(current_date.strftime("%Y-%m-%d")):
+                    workday_start = datetime.combine(current_date, time(REGULAR_WORKDAY_START, 0, 0))
+                    if day_start < workday_start:
+                        # 00:00부터 09:00까지만 휴일근로로 계산
+                        day_end = min(day_end, workday_start)
+                    else:
+                        # 이미 평일 09:00 이후라면 휴일근로 계산 종료
+                        break
+                
+                # 해당 날짜의 근무 시간 계산
+                day_hours = (day_end - day_start).total_seconds() / 3600
+                
+                # 휴게시간 적용 (9시간 이상 근무 시)
+                if day_hours >= 9:
+                    day_hours -= 1
+                
+                # 휴일근로 누적 및 계산 (8시간 기준)
+                if total_holiday_hours < 8:
+                    # 8시간 이내 부분
+                    if total_holiday_hours + day_hours <= 8:
+                        # 모두 1.5배 적용
+                        total_holiday_pay += day_hours * hourly_rate * 1.5
+                        total_holiday_hours += day_hours
+                    else:
+                        # 일부는 1.5배, 일부는 2.0배 적용
+                        hours_within_8 = 8 - total_holiday_hours
+                        hours_over_8 = day_hours - hours_within_8
+                        
+                        total_holiday_pay += hours_within_8 * hourly_rate * 1.5
+                        total_holiday_pay += hours_over_8 * hourly_rate * 2.0
+                        total_holiday_hours += day_hours
+                else:
+                    # 이미 8시간 초과한 경우, 모두 2.0배 적용
+                    total_holiday_pay += day_hours * hourly_rate * 2.0
+                    total_holiday_hours += day_hours
+                
+                # 다음 날로 이동
+                current_date += timedelta(days=1)
+        
         return int(total_holiday_pay)
 
     def get_total_pay(

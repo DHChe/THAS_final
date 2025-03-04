@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useMemo } from 'react';
 import {
   Box,
   Container,
@@ -13,6 +13,22 @@ import {
   DialogContent,
   DialogActions,
   ButtonGroup,
+  Snackbar,
+  TextField,
+  Chip,
+  Divider,
+  Modal,
+  FormControl,
+  InputLabel,
+  Select,
+  MenuItem,
+  TableContainer,
+  Table,
+  TableHead,
+  TableBody,
+  TableRow,
+  TableCell,
+  IconButton,
 } from '@mui/material';
 import { DatePicker } from '@mui/x-date-pickers';
 import { AdapterDayjs } from '@mui/x-date-pickers/AdapterDayjs';
@@ -30,6 +46,8 @@ import { StyledPaper, StyledButton } from '../../components/StyledComponents';
 import { ThemeProvider } from '@mui/material/styles';
 import theme from '../../styles/theme';
 import commonStyles from '../../styles/styles';
+import CheckCircleOutlineIcon from '@mui/icons-material/CheckCircleOutline';
+import WarningIcon from '@mui/icons-material/Warning';
 
 // dayjs 플러그인 설정
 import isSameOrBefore from 'dayjs/plugin/isSameOrBefore';
@@ -113,6 +131,9 @@ const PayrollPayment = () => {
   const [alert, setAlert] = useState({ open: false, message: '', severity: 'info' });
   const [attendanceData, setAttendanceData] = useState([]);
   const [calculationResults, setCalculationResults] = useState([]);
+  const [isConfirming, setIsConfirming] = useState(false);
+  const [confirmedPayrolls, setConfirmedPayrolls] = useState([]);
+  const [confirmModalOpen, setConfirmModalOpen] = useState(false);
 
   // 컴포넌트 마운트 시 기본값 설정
   useEffect(() => {
@@ -263,7 +284,27 @@ const PayrollPayment = () => {
         throw new Error(errorData.error || '급여 계산 실패');
       }
       const data = await response.json();
-      setCalculationResults(data.results);
+      
+      // 계산 결과를 저장할 때 status 필드 유지 확인
+      // 각 결과 항목에 status 필드가 없는 경우 백엔드에서 제공된 status를 사용
+      // 그렇지 않으면 기본값 'unconfirmed' 설정
+      const resultsWithStatus = data.results.map(result => {
+        // 백엔드에서 이미 status 필드를 포함한 경우 그대로 사용
+        if (result.status) {
+          return result;
+        }
+        // 기존 confirmPayrolls 중에서 일치하는 항목이 있는지 확인
+        const existingPayroll = confirmedPayrolls.find(
+          p => p.employee_id === result.employee_id
+        );
+        // 일치하는 항목이 있으면 해당 상태 사용, 없으면 기본값
+        return {
+          ...result,
+          status: existingPayroll ? 'confirmed' : 'unconfirmed'
+        };
+      });
+      
+      setCalculationResults(resultsWithStatus);
       setAlert({ open: true, message: '급여 계산 완료', severity: 'success' });
     } catch (err) {
       setAlert({ open: true, message: `계산 오류: ${err.message}`, severity: 'error' });
@@ -307,6 +348,76 @@ const PayrollPayment = () => {
     } finally {
       setCalculating(false);
     }
+  };
+
+  // 급여 확정 모달 열기 함수
+  const handleOpenConfirmModal = () => {
+    if (calculationResults.length === 0) {
+      setAlert({ open: true, message: '먼저 급여를 계산해주세요.', severity: 'warning' });
+      return;
+    }
+    setConfirmModalOpen(true);
+  };
+
+  // 급여 확정 처리 함수
+  const handleConfirmPayroll = async () => {
+    setIsConfirming(true);
+    try {
+      // 계산된 급여 결과에서 payroll_code 목록 추출
+      const payrollIds = calculationResults.map(result => result.payroll_code);
+      
+      const response = await fetch('http://localhost:5000/api/payroll/confirm', {
+        method: 'PUT', // PUT 메소드로 변경 (백엔드 API와 일치)
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          payroll_ids: payrollIds, // 백엔드 API와 일치하는 필드명
+          remarks: `${selectedPeriod.start.format('YYYY-MM-DD')}~${selectedPeriod.end.format('YYYY-MM-DD')} 급여 확정`
+        })
+      });
+
+      if (!response.ok) {
+        const errorData = await response.json();
+        throw new Error(errorData.error || '급여 확정 실패');
+      }
+
+      const data = await response.json();
+      setConfirmedPayrolls(data.confirmed_payrolls || []);
+      
+      // 상태 업데이트: 현재 계산 결과의 상태를 'confirmed'로 변경
+      const updatedResults = calculationResults.map(result => ({
+        ...result,
+        status: 'confirmed'
+      }));
+      setCalculationResults(updatedResults);
+      
+      // 급여 확정 성공 메시지와 함께 분석 페이지로 이동 안내 추가
+      setAlert({ 
+        open: true, 
+        message: `${data.message || '급여 확정이 완료되었습니다.'} 이제 급여 분석 페이지에서 확정된 급여 데이터를 분석할 수 있습니다.`, 
+        severity: 'success',
+        action: (
+          <Button 
+            color="primary" 
+            size="small" 
+            onClick={() => window.location.href = '/payroll/analysis'}
+          >
+            분석 페이지로 이동
+          </Button>
+        )
+      });
+      
+      // 모달 닫기
+      setConfirmModalOpen(false);
+    } catch (err) {
+      setAlert({ open: true, message: `급여 확정 오류: ${err.message}`, severity: 'error' });
+    } finally {
+      setIsConfirming(false);
+    }
+  };
+
+  // 모달 닫기 함수
+  const handleCloseConfirmModal = () => {
+    setConfirmModalOpen(false);
   };
 
   const handleCloseAlert = () => {
@@ -616,7 +727,7 @@ const PayrollPayment = () => {
                     {/* 급여명세서 발송 버튼 추가 */}
                     <StyledButton
                       variant="outlined"
-                      onClick={handleSendPayslips}
+                      onClick={handleOpenConfirmModal}
                       disabled={calculating || calculationResults.length === 0}
                       sx={{
                         backgroundColor: 'white',
@@ -626,12 +737,16 @@ const PayrollPayment = () => {
                         },
                       }}
                     >
-                      {calculating ? <CircularProgress size={24} /> : '급여명세서 발송'}
+                      {calculating ? <CircularProgress size={24} /> : '급여 확정'}
                     </StyledButton>
                   </Box>
                 </Box>
                 <PayrollSummary calculationResults={calculationResults} employees={employees} />
-                <PayrollTable calculationResults={calculationResults} employees={employees} />
+                <PayrollTable 
+                  calculationResults={calculationResults} 
+                  employees={employees}
+                  confirmedPayrolls={confirmedPayrolls}
+                />
               </StyledPaper>
             </Grid>
           </Grid>
@@ -660,6 +775,62 @@ const PayrollPayment = () => {
             </Button>
           </DialogActions>
         </Dialog>
+
+        {/* 급여 확정 모달 */}
+        <Dialog
+          open={confirmModalOpen}
+          onClose={handleCloseConfirmModal}
+          aria-labelledby="confirm-payroll-dialog-title"
+          maxWidth="sm"
+          fullWidth
+        >
+          <DialogTitle id="confirm-payroll-dialog-title">
+            <Box display="flex" alignItems="center">
+              <WarningIcon sx={{ color: 'warning.main', mr: 1 }} />
+              급여 확정
+            </Box>
+          </DialogTitle>
+          <DialogContent>
+            <Typography variant="body1" gutterBottom>
+              {selectedEmployees.length}명의 직원에 대한 급여를 확정하시겠습니까?
+            </Typography>
+            <Typography variant="body2" color="text.secondary">
+              급여 기간: {selectedPeriod.start?.format('YYYY년 MM월 DD일')} ~ {selectedPeriod.end?.format('YYYY년 MM월 DD일')}
+            </Typography>
+            <Alert severity="warning" sx={{ mt: 2 }}>
+              급여 확정 후에는 수정이 불가능합니다. 계산된 급여 정보를 다시 한 번 확인해주세요.
+            </Alert>
+          </DialogContent>
+          <DialogActions>
+            <Button onClick={handleCloseConfirmModal}>취소</Button>
+            <Button 
+              onClick={handleConfirmPayroll} 
+              variant="contained" 
+              color="primary"
+              disabled={isConfirming}
+              startIcon={isConfirming ? <CircularProgress size={20} color="inherit" /> : null}
+            >
+              {isConfirming ? '처리 중...' : '확정하기'}
+            </Button>
+          </DialogActions>
+        </Dialog>
+
+        {/* 알림 메시지 */}
+        <Snackbar
+          open={alert.open}
+          autoHideDuration={6000}
+          onClose={handleCloseAlert}
+          anchorOrigin={{ vertical: 'bottom', horizontal: 'center' }}
+        >
+          <Alert 
+            onClose={handleCloseAlert} 
+            severity={alert.severity} 
+            sx={{ width: '100%' }}
+            action={alert.action}
+          >
+            {alert.message}
+          </Alert>
+        </Snackbar>
       </Box>
     </ThemeProvider>
   );

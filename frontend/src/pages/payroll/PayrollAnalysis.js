@@ -40,8 +40,6 @@ import { LocalizationProvider, DatePicker } from '@mui/x-date-pickers';
 import { AdapterDayjs } from '@mui/x-date-pickers/AdapterDayjs';
 import ExpandMoreIcon from '@mui/icons-material/ExpandMore';
 import GlobalTabs from '../../components/GlobalTabs'; // GlobalNavigation을 GlobalTabs로 변경
-import { parseCSV } from '../../utils/csvParser';
-import { filterPayrollData } from '../../utils/payrollFilters';
 import dayjs from 'dayjs';
 import { summarizeSearchResults, generateInitialAIMessage } from '../../utils/aiService';
 import AIMessageInput from '../../components/chat/AIMessageInput';
@@ -51,11 +49,7 @@ import { analyzeData } from '../../services/aiService';
 import { VIEW_MODES, TABLE_COLUMNS, getActiveColumns, SALARY_TABS, BASE_COLUMNS } from '../../utils/tableConstants';
 import { transformPayrollData } from '../../utils/payrollDataTransformer';
 import isSameOrBefore from 'dayjs/plugin/isSameOrBefore';
-import { PayrollEmbeddingProcessor } from '../../utils/embeddingProcessor';
-import { VectorStoreManager } from '../../utils/vectorStoreManager';
-import { performanceMonitor } from '../../utils/performanceMonitor';
 import ProcessingProgress from '../../components/progress/ProcessingProgress';
-import { PayrollRAGSystem } from '../../utils/ragSystem';
 import { checkLangSmithSetup } from '../../utils/debugLangSmith';
 import { DataChangeDetector } from '../../utils/dataChangeDetector';
 import { message } from 'antd';
@@ -146,24 +140,18 @@ const PayrollAnalysis = () => {
   // 전체 검색 상태 추가
   const [allSearch, setAllSearch] = useState(false);
 
-  // RAG 시스템 추가
-  const [ragSystem, setRagSystem] = useState(null);
+  // 불필요한 벡터 스토어 및 RAG 시스템 관련 상태 제거
   const [isAnalyzing, setIsAnalyzing] = useState(false);
   const [analysisResult, setAnalysisResult] = useState(null);
 
   // 로딩 상태 관리를 위한 state 추가
   const [isLoading, setIsLoading] = useState(false);
-  const [vectorStore, setVectorStore] = useState(null);
+  // 벡터 스토어 관련 상태 제거
   const [processingState, setProcessingState] = useState({
     status: 'idle',
     progress: 0,
     message: ''
   });
-
-  // 벡터 스토어 관련 상태 추가
-  const [vectorStoreManager] = useState(new VectorStoreManager());
-  const [embeddingProcessor, setEmbeddingProcessor] = useState(null);
-  const [isInitializing, setIsInitializing] = useState(false);
 
   // 최대/최소 날짜 상태 추가
   const [maxDate, setMaxDate] = useState(null);
@@ -197,1347 +185,612 @@ const PayrollAnalysis = () => {
   };
 
   // 데이터 로딩
-  useEffect(() => {
-    const loadData = async () => {
-      try {
-        console.log('데이터 로딩 시작');
-        
-        const employeesResponse = await fetch('/data/employees.csv');
-        if (!employeesResponse.ok) {
-          throw new Error(`직원 데이터 로딩 실패: ${employeesResponse.status}`);
-        }
-        const employeesText = await employeesResponse.text();
-        console.log('직원 데이터 샘플:', employeesText.slice(0, 200));
-        
-        const payrollResponse = await fetch('/data/payroll.csv');
-        if (!payrollResponse.ok) {
-          throw new Error(`급여 데이터 로딩 실패: ${payrollResponse.status}`);
-        }
-        const payrollText = await payrollResponse.text();
-        console.log('급여 데이터 샘플:', payrollText.slice(0, 200));
-
-        const employees = await parseCSV('/data/employees.csv');
-        const payroll = await parseCSV('/data/payroll.csv');
-        
-        console.log('파싱된 직원 데이터 샘플:', employees[0]);
-        console.log('파싱된 급여 데이터 샘플:', payroll[0]);
-        console.log('로드된 직원 수:', employees.length);
-        console.log('로드된 급여 데이터 수:', payroll.length);
-        
-        setEmployeesData(employees);
-        setPayrollData(payroll);
-
-        if (payroll.length > 0) {
-          const latestPayment = payroll.reduce((latest, current) => latest.payment_date > current.payment_date ? latest : current);
-          const earliestPayment = payroll.reduce((earliest, current) => earliest.payment_date < current.payment_date ? earliest : current);
-
-          const latestDate = dayjs(latestPayment.payment_date);
-          const earliestDate = dayjs(earliestPayment.payment_date);
-          
-          setMaxDate(latestDate);
-          setMinDate(earliestDate);
-          
-          setStartDate(latestDate);
-          setEndDate(latestDate);
-        }
-      } catch (error) {
-        console.error('데이터 로딩 상세 에러:', error);
+  const loadData = async () => {
+    try {
+      console.log('데이터 로딩 시작');
+      
+      // CSV 파일 로드 대신 백엔드 API 호출
+      // 직원 데이터 로드
+      const employeesResponse = await fetch('/api/employees');
+      if (!employeesResponse.ok) {
+        throw new Error(`직원 데이터 로딩 실패: ${employeesResponse.status}`);
       }
-    };
+      const employees = await employeesResponse.json();
+      
+      // 확정된 급여 데이터만 로드 (confirmed 또는 paid 상태)
+      const payrollResponse = await fetch('/api/payroll/records?status=confirmed,paid');
+      if (!payrollResponse.ok) {
+        throw new Error(`급여 데이터 로딩 실패: ${payrollResponse.status}`);
+      }
+      const payrollData = await payrollResponse.json();
+      
+      console.log('로드된 직원 수:', employees.length);
+      console.log('로드된 급여 데이터 수:', payrollData.length);
+      
+      setEmployeesData(employees);
+      setPayrollData(payrollData);
 
+      if (payrollData.length > 0) {
+        // 날짜 형식 변환 (백엔드 API 응답에 맞게 조정)
+        const paymentDates = payrollData.map(p => dayjs(p.payment_date));
+        const latestDate = dayjs.max(paymentDates);
+        const earliestDate = dayjs.min(paymentDates);
+        
+        setMaxDate(latestDate);
+        setMinDate(earliestDate);
+        
+        setStartDate(latestDate);
+        setEndDate(latestDate);
+      }
+    } catch (error) {
+      console.error('데이터 로딩 상세 에러:', error);
+      setAlert({
+        open: true,
+        message: '급여 데이터 로드 중 오류가 발생했습니다.',
+        severity: 'error'
+      });
+    }
+  };
+
+  // 지원금 계산 함수 (단순 임시 로직)
+  function calculateSubsidy(employee, baseSalary) {
+    // 실제로는 더 복잡한 로직이 필요
+    return Math.floor(baseSalary * 0.05); 
+  }
+
+  // 부서 필터 상태 업데이트
+  const handleDepartmentChange = (dept) => {
+    if (dept === '전체') {
+      // 전체 선택 시 모든 부서 선택/해제 토글
+      const allSelected = !departments['전체'];
+      const newDepartments = Object.keys(departments).reduce((acc, curr) => {
+        acc[curr] = allSelected;
+        return acc;
+      }, {});
+      setDepartments(newDepartments);
+    } else {
+      // 개별 부서 선택 토글
+      setDepartments({
+        ...departments,
+        [dept]: !departments[dept],
+        '전체': false
+      });
+    }
+  };
+
+  // 급여 필터링 로직
+  const applyFilters = useCallback(() => {
+    if (!payrollData.length) return;
+    
+    console.log('필터링 시작', {
+      nameQuery,
+      departments,
+      startDate: startDate?.format('YYYY-MM-DD'),
+      endDate: endDate?.format('YYYY-MM-DD'),
+      positions
+    });
+
+    let result = [...payrollData];
+
+    // 이름 검색 필터
+    if (nameQuery) {
+      const employeeIds = employeesData
+        .filter(emp => emp.name.includes(nameQuery))
+        .map(emp => emp.employee_id);
+      
+      result = result.filter(record => employeeIds.includes(record.employee_id));
+    }
+
+    // 부서 필터
+    const selectedDepartments = Object.entries(departments)
+      .filter(([_, isSelected]) => isSelected)
+      .map(([dept, _]) => dept);
+
+    if (selectedDepartments.length > 0 && !selectedDepartments.includes('전체')) {
+      const employeeIds = employeesData
+        .filter(emp => selectedDepartments.includes(emp.department))
+        .map(emp => emp.employee_id);
+      
+      result = result.filter(record => employeeIds.includes(record.employee_id));
+    }
+
+    // 직급 필터
+    const selectedPositions = Object.entries(positions)
+      .filter(([_, isSelected]) => isSelected)
+      .map(([pos, _]) => pos);
+
+    if (selectedPositions.length > 0 && !selectedPositions.includes('전체')) {
+      const employeeIds = employeesData
+        .filter(emp => selectedPositions.includes(emp.position))
+        .map(emp => emp.employee_id);
+      
+      result = result.filter(record => employeeIds.includes(record.employee_id));
+    }
+
+    // 날짜 필터
+    if (startDate && endDate) {
+      result = result.filter(record => {
+        const recordDate = dayjs(record.payment_date);
+        return (
+          recordDate.isAfter(startDate, 'day') || recordDate.isSame(startDate, 'day')
+        ) && (
+          recordDate.isBefore(endDate, 'day') || recordDate.isSame(endDate, 'day')
+        );
+      });
+    }
+
+    console.log(`필터링 결과: ${result.length}건`);
+    setFilteredData(result);
+    setPage(0); // 페이지 리셋
+  }, [payrollData, nameQuery, departments, positions, startDate, endDate, employeesData]);
+
+  // 엔드포인트에서 가져온 데이터에 필터 적용
+  useEffect(() => {
+    applyFilters();
+  }, [applyFilters]);
+
+  // 데이터 로드
+  useEffect(() => {
     loadData();
   }, []);
 
-  // 빠른 기간 선택 핸들러
-  const handleQuickDateRange = (range, baseDate = endDate) => {
-    if (!baseDate) return;
-    
-    setQuickDateRange(range);
-    const end = baseDate;
-    let start;
+  // 빠른 날짜 범위 설정
+  const setQuickDateFilter = (range) => {
+    const endDate = dayjs();
+    let startDate;
 
     switch (range) {
+      case '1m':
+        startDate = endDate.subtract(1, 'month');
+        break;
       case '3m':
-        start = baseDate.subtract(3, 'month');
+        startDate = endDate.subtract(3, 'month');
         break;
       case '6m':
-        start = baseDate.subtract(6, 'month');
+        startDate = endDate.subtract(6, 'month');
         break;
       case '1y':
-        start = baseDate.subtract(1, 'year');
+        startDate = endDate.subtract(1, 'year');
         break;
       default:
-        return;
+        startDate = endDate.subtract(3, 'month');
     }
 
-    setStartDate(start);
-    setEndDate(end);
+    setStartDate(startDate);
+    setEndDate(endDate);
+    setQuickDateRange(range);
   };
 
-  // 검색 처리 함수
-  const handleSearch = () => {
-    if (!startDate || !endDate) {
-      setAlert({
-        open: true,
-        message: '검색할 기간을 설정해주세요.',
-        severity: 'warning'
-      });
-      return;
-    }
-
-    const searchTerm = searchQuery.trim();
-    if (searchTerm.length === 1 && !searchTerm.match(/^\d+$/)) {
-      setAlert({
-        open: true,
-        message: '이름 검색 시 2글자 이상 입력해주세요.',
-        severity: 'warning'
-      });
-      return;
-    }
-
-    const hasNameOrId = searchTerm.length > 0;
-    const hasDepartment = Object.values(departments).some(v => v);
-    const hasPosition = Object.values(positions).some(v => v);
-
-    if (!hasNameOrId && !hasDepartment && !hasPosition) {
-      setAlert({
-        open: true,
-        message: '이름/사번, 부서, 직급 중 하나 이상을 선택해주세요.',
-        severity: 'warning'
-      });
-      return;
-    }
-
-    if (hasNameOrId) {
-      let matchedEmployees = employeesData.filter(emp => 
-        emp.name.includes(searchTerm) || emp.employee_id.includes(searchTerm)
-      );
-
-      if (hasDepartment && !departments['전체']) {
-        matchedEmployees = matchedEmployees.filter(emp => 
-          departments[departmentMap[emp.department] || emp.department]
-        );
-      }
-
-      if (hasPosition && !positions['전체']) {
-        matchedEmployees = matchedEmployees.filter(emp => 
-          positions[emp.position]
-        );
-      }
-
-      if (matchedEmployees.length === 0) {
-        setAlert({
-          open: true,
-          message: '검색 조건에 맞는 직원이 없습니다.',
-          severity: 'warning'
-        });
-        return;
-      }
-
-      if (matchedEmployees.length > 1 && !searchTerm.match(/^\d+$/)) {
-        setDuplicateEmployees(matchedEmployees);
-        setOpenDialog(true);
-        return;
-      }
-
-      if (matchedEmployees.length === 1) {
-        performSearch(matchedEmployees[0]);
-        return;
-      }
-    }
-
-    performSearch();
-  };
-
-  const performSearch = (selectedEmployee = null) => {
-    let filtered = payrollData.filter(payroll => {
-      const employee = employeesData.find(emp => emp.employee_id === payroll.employee_id);
-      if (!employee) return false;
-
-      const paymentDate = payroll.payment_date.substring(0, 7);
-      const start = startDate.format('YYYY-MM');
-      const end = endDate.format('YYYY-MM');
-      
-      if (paymentDate < start || paymentDate > end) {
-        return false;
-      }
-
-      if (selectedEmployee) {
-        return employee.employee_id === selectedEmployee.employee_id;
-      }
-
-      const departmentMatch = !departments['전체'] ? 
-        departments[departmentMap[employee.department] || employee.department] : true;
-      const positionMatch = !positions['전체'] ? 
-        positions[employee.position] : true;
-
-      return departmentMatch && positionMatch;
-    });
-
-    filtered.sort((a, b) => b.payment_date.localeCompare(a.payment_date));
+  // AI 쿼리 처리 핸들러
+  const handleAIQuery = async (query) => {
+    if (!query) return;
     
-    setFilteredData(filtered);
-    setPage(0);
-  };
-
-  const handleEmployeeSelect = (employee) => {
-    setSelectedEmployee(employee);
-    setOpenDialog(false);
-    performSearch(employee);
-  };
-
-  const handleCloseDialog = () => {
-    setOpenDialog(false);
-    setDuplicateEmployees([]);
-  };
-
-  const handleAllSearch = () => {
-    const newAllSearchState = !allSearch;
-    setAllSearch(newAllSearchState);
-    
-    const newDepartments = { ...departments };
-    Object.keys(newDepartments).forEach(dept => {
-      newDepartments[dept] = newAllSearchState;
-    });
-    setDepartments(newDepartments);
-    
-    const newPositions = { ...positions };
-    Object.keys(newPositions).forEach(pos => {
-      newPositions[pos] = newAllSearchState;
-    });
-    setPositions(newPositions);
-  };
-
-  useEffect(() => {
-    const allDepartmentsSelected = Object.values(departments).every(v => v);
-    const allPositionsSelected = Object.values(positions).every(v => v);
-    setAllSearch(allDepartmentsSelected && allPositionsSelected);
-  }, [departments, positions]);
-
-  const handleAllDepartments = () => {
-    const newDepartments = { ...departments };
-    const allSelected = !departments['전체'];
-    
-    Object.keys(newDepartments).forEach(dept => {
-      newDepartments[dept] = allSelected;
-    });
-    
-    setDepartments(newDepartments);
-  };
-
-  const handleDepartmentChange = (dept) => {
-    if (dept === '전체') {
-      handleAllDepartments();
-    } else {
-      setDepartments(prev => {
-        const newDepartments = {
-          ...prev,
-          [dept]: !prev[dept]
-        };
-        const allSelected = Object.entries(newDepartments)
-          .filter(([key]) => key !== '전체')
-          .every(([, value]) => value);
-        
-        return {
-          ...newDepartments,
-          '전체': allSelected
-        };
-      });
-    }
-  };
-
-  const handleAllPositions = () => {
-    const newPositions = { ...positions };
-    const allSelected = !positions['전체'];
-    
-    Object.keys(newPositions).forEach(pos => {
-      newPositions[pos] = allSelected;
-    });
-    
-    setPositions(newPositions);
-  };
-
-  const handlePositionChange = (position) => {
-    if (position === '전체') {
-      handleAllPositions();
-    } else {
-      setPositions(prev => {
-        const newPositions = {
-          ...prev,
-          [position]: !prev[position]
-        };
-        const allSelected = Object.entries(newPositions)
-          .filter(([key]) => key !== '전체')
-          .every(([, value]) => value);
-        
-        return {
-          ...newPositions,
-          '전체': allSelected
-        };
-      });
-    }
-  };
-
-  const handleStartDateChange = (newValue) => {
-    if (minDate && newValue.isBefore(minDate)) {
-      setStartDate(minDate);
-      setAlert({
-        open: true,
-        message: `${minDate.format('YYYY년 M월')} 이전의 데이터는 없습니다.`,
-        severity: 'warning'
-      });
-      return;
-    }
-
-    setStartDate(newValue);
-    if (endDate && newValue && newValue.isAfter(endDate)) {
-      setEndDate(newValue);
-    }
-  };
-
-  const handleEndDateChange = (newValue) => {
-    if (maxDate && newValue.isAfter(maxDate)) {
-      setEndDate(maxDate);
-      setAlert({
-        open: true,
-        message: `${maxDate.format('YYYY년 M월')} 이후의 데이터는 없습니다.`,
-        severity: 'warning'
-      });
-      return;
-    }
-
-    setEndDate(newValue);
-    if (startDate && newValue && newValue.isBefore(startDate)) {
-      setStartDate(newValue);
-    }
-  };
-
-  const formatCurrency = (amount) => {
-    return new Intl.NumberFormat('ko-KR', {
-      style: 'currency',
-      currency: 'KRW'
-    }).format(amount);
-  };
-
-  const handleAlertClose = (event, reason) => {
-    if (reason === 'clickaway') {
-      return;
-    }
-    setAlert(prev => ({ ...prev, open: false }));
-  };
-
-  const handleReset = () => {
-    setSearchQuery('');
-    setDepartments({
-      '전체': false,
-      '개발': false,
-      '영업': false,
-      '총무': false,
-      '재무': false,
-      '생산': false
-    });
-    setPositions({
-      '전체': false,
-      '사원': false,
-      '대리': false,
-      '과장': false,
-      '차장': false,
-      '부장': false
-    });
-    setAdvancedFilters({
-      joinDateRange: {
-        start: null,
-        end: null
-      },
-      tenureRange: [0, 10],
-      showAdvanced: false
-    });
-
-    const currentDate = dayjs();
-    setEndDate(currentDate);
-    setStartDate(currentDate.subtract(3, 'month'));
-    setQuickDateRange('3m');
-    setExpandedAdvanced(false);
-    setPage(0);
-    setFilteredData([]);
-  };
-
-  const handleMessageInput = (value) => {
-    setInputMessage(value);
-  };
-
-  const handleSendMessage = async () => {
-    if (!inputMessage.trim()) return;
-    
-    console.log('메시지 전송 시작:', inputMessage);
-    
-    const newUserMessage = {
-      type: 'user',
-      content: inputMessage,
-      timestamp: new Date().toISOString()
-    };
-    
-    setChatMessages(prev => [...prev, newUserMessage]);
-    setInputMessage('');
-    setIsAiThinking(true);
-
     try {
-      console.log('AI 분석 요청:', {
+      // 사용자 메시지 추가
+      const userMessage = { role: 'user', content: query };
+      setChatMessages(prev => [...prev, userMessage]);
+      setIsAiThinking(true);
+      
+      console.log('AI 분석 요청 준비:', {
         filteredDataLength: filteredData.length,
         employeesDataLength: employeesData.length,
-        query: inputMessage
+        query
       });
 
-      const response = await analyzeData(filteredData, employeesData, inputMessage);
-      console.log('AI 응답 받음:', response);
+      // 백엔드 API 호출로 변경
+      const result = await analyzeData(filteredData, employeesData, query);
       
-      const aiMessage = {
-        type: 'ai',
-        content: response.analysis,
-        timestamp: new Date().toISOString()
-      };
-      
+      // AI 응답 메시지 추가
+      const aiMessage = { role: 'assistant', content: result.analysis };
       setChatMessages(prev => [...prev, aiMessage]);
+      
     } catch (error) {
-      console.error('메시지 처리 중 상세 오류:', error);
+      console.error('AI 쿼리 처리 중 오류:', error);
+      
+      // 오류 메시지 추가
+      const errorMessage = { 
+        role: 'assistant', 
+        content: `분석 중 오류가 발생했습니다: ${error.message}` 
+      };
+      setChatMessages(prev => [...prev, errorMessage]);
+      
       setAlert({
         open: true,
-        message: '분석 중 오류가 발생했습니다: ' + (error.message || '알 수 없는 오류'),
+        message: '데이터 분석 중 오류가 발생했습니다.',
         severity: 'error'
       });
     } finally {
       setIsAiThinking(false);
+      setInputMessage('');
     }
   };
 
-  const getPaymentPeriodText = useCallback(() => {
-    if (!startDate || !endDate) return '';
-    if (startDate.format('YYYY-MM') === endDate.format('YYYY-MM')) {
-      return startDate.format('YYYY-MM');
-    }
-    return `${startDate.format('YYYY-MM')} ~ ${endDate.format('YYYY-MM')}`;
-  }, [startDate, endDate]);
+  // 랜더링을 위한 통합 데이터 (직원 정보 + 급여 정보)
+  const integratedData = useMemo(() => {
+    return filteredData.map(payroll => {
+      const employee = employeesData.find(emp => emp.employee_id === payroll.employee_id) || {};
+      return {
+        ...payroll,
+        name: employee.name || '정보 없음',
+        department: employee.department || '정보 없음',
+        position: employee.position || '정보 없음',
+        hireDate: employee.hire_date || '정보 없음'
+      };
+    });
+  }, [filteredData, employeesData]);
 
-  const getMonthlyColumns = useCallback(() => {
-    if (!startDate || !endDate) return [];
-    
-    const months = [];
-    let current = dayjs(startDate);
-    const end = dayjs(endDate);
-    
-    while (current.isSameOrBefore(end, 'month')) {
-      months.push({
-        id: `${current.format('YYYY-MM')}`,
-        label: `${current.format('YY년 M월')}`,
-        numeric: true
-      });
-      current = current.add(1, 'month');
-    }
-    
-    return months;
-  }, [startDate, endDate]);
-
-  const transformedData = useMemo(() => {
-    if (!filteredData.length) return [];
-    
-    return filteredData.reduce((acc, row) => {
-      const employee = employeesData.find(emp => emp.employee_id === row.employee_id);
-      
-      const existingRow = acc.find(item => item.employee_id === row.employee_id);
-      const monthKey = row.payment_date.substring(0, 7);
-      const amount = activeTab === 'total_salary'
-        ? Number(row.base_salary) + Number(row.overtime_pay) + 
-          Number(row.night_shift_pay) + Number(row.holiday_pay)
-        : Number(row[activeTab]);
-
-      if (existingRow) {
-        existingRow[monthKey] = amount;
-      } else {
-        const newRow = {
-          employee_id: row.employee_id,
-          name: employee?.name || '',
-          department: employee?.department || '',
-          position: employee?.position || '',
-          [monthKey]: amount
-        };
-        acc.push(newRow);
+  // 직원별 급여 내역 그룹화
+  const employeePayrollGroups = useMemo(() => {
+    const groups = {};
+    filteredData.forEach(record => {
+      if (!groups[record.employee_id]) {
+        groups[record.employee_id] = [];
       }
-      
-      return acc;
-    }, []);
-  }, [filteredData, activeTab, employeesData]);
+      groups[record.employee_id].push(record);
+    });
+    return groups;
+  }, [filteredData]);
 
-  const renderSalaryTabs = () => (
-    <ButtonGroup 
-      size="small" 
-      sx={{ 
-        mb: 2,
-        '& .MuiButton-root': {
-          color: theme.palette.text.primary,
-          borderColor: 'rgba(0, 0, 0, 0.3)',
-          fontSize: '0.75rem',
-          py: 0.5,
-          '&.Mui-selected': {
-            backgroundColor: 'rgba(0, 123, 255, 0.2)',
-          },
-          '&:hover': {
-            backgroundColor: 'rgba(0, 0, 0, 0.05)',
-          }
-        }
-      }}
-    >
-      {Object.values(SALARY_TABS).map(tab => (
-        <Button
-          key={tab.id}
-          onClick={() => setActiveTab(tab.id)}
-          variant={activeTab === tab.id ? 'contained' : 'outlined'}
-        >
-          {tab.label}
-        </Button>
-      ))}
-    </ButtonGroup>
+  // 직원별 총 급여 통계
+  const employeeStats = useMemo(() => {
+    return Object.keys(employeePayrollGroups).map(empId => {
+      const records = employeePayrollGroups[empId];
+      const emp = employeesData.find(e => e.employee_id === empId) || {};
+      
+      return {
+        employee_id: empId,
+        name: emp.name || '정보 없음',
+        department: emp.department || '정보 없음',
+        position: emp.position || '정보 없음',
+        recordCount: records.length,
+        totalGrossPay: records.reduce((sum, r) => sum + Number(r.gross_pay || 0), 0),
+        avgGrossPay: records.reduce((sum, r) => sum + Number(r.gross_pay || 0), 0) / records.length,
+        lastPayDate: records.length > 0 ? new Date(Math.max(...records.map(r => new Date(r.payment_date)))) : null
+      };
+    });
+  }, [employeePayrollGroups, employeesData]);
+
+  // 알림 닫기 핸들러
+  const handleAlertClose = () => {
+    setAlert(prev => ({ ...prev, open: false }));
+  };
+
+  // 페이지네이션 핸들러
+  const handleChangePage = (event, newPage) => {
+    setPage(newPage);
+  };
+
+  // 테이블에 보여줄 데이터 (페이지네이션 적용)
+  const currentPageData = integratedData.slice(
+    page * rowsPerPage,
+    page * rowsPerPage + rowsPerPage
   );
-
-  const renderTableContent = () => {
-    const monthlyColumns = getMonthlyColumns();
-    const columns = [...BASE_COLUMNS, ...monthlyColumns];
-
-    return (
-      <>
-        <TableHead>
-          <TableRow>
-            {columns.map(column => (
-              <TableCell 
-                key={column.id}
-                align={column.numeric ? 'right' : 'center'}
-                sx={{ 
-                  color: theme.palette.text.primary,
-                  fontSize: '0.75rem',
-                  fontWeight: 600,
-                  borderBottom: '1px solid rgba(0, 0, 0, 0.1)'
-                }}
-              >
-                {column.label}
-              </TableCell>
-            ))}
-          </TableRow>
-        </TableHead>
-        <TableBody>
-          {transformedData
-            .slice(page * rowsPerPage, page * rowsPerPage + rowsPerPage)
-            .map((row, index) => (
-              <TableRow key={index}>
-                {columns.map(column => (
-                  <TableCell 
-                    key={column.id}
-                    align={column.numeric ? 'right' : 'center'}
-                    sx={{ 
-                      color: theme.palette.text.primary,
-                      fontSize: '0.75rem',
-                      borderBottom: '1px solid rgba(0, 0, 0, 0.1)'
-                    }}
-                  >
-                    {column.numeric 
-                      ? formatCurrency(row[column.id] || 0)
-                      : row[column.id]}
-                  </TableCell>
-                ))}
-              </TableRow>
-            ))}
-        </TableBody>
-      </>
-    );
-  };
-
-  const renderMessage = (message) => (
-    <Box
-      sx={{
-        p: 1,
-        my: 1,
-        backgroundColor: message.type === 'ai' ? 'rgba(0, 123, 255, 0.1)' : 'transparent',
-        borderRadius: 1,
-        whiteSpace: 'pre-wrap',
-        wordBreak: 'break-word'
-      }}
-    >
-      <Typography
-        variant="body2"
-        sx={{
-          color: theme.palette.text.primary,
-          fontSize: '0.75rem',
-          lineHeight: 1.5
-        }}
-      >
-        {message.content}
-      </Typography>
-    </Box>
-  );
-
-  const initializeVectorStore = async (payrollData, employeesData, processor) => {
-    try {
-      setProcessingState({
-        status: 'processing',
-        progress: 0,
-        message: '벡터 스토어 초기화 중...'
-      });
-
-      const manager = new VectorStoreManager();
-      
-      const { isValid, reason, metadata } = await manager.checkCacheValidity();
-      
-      if (isValid) {
-        console.log('캐시된 벡터 스토어 사용', metadata);
-        setProcessingState({
-          status: 'processing',
-          progress: 50,
-          message: '캐시된 데이터 로드 중...'
-        });
-        
-        const cachedStore = await manager.loadVectorStore(processor.embeddings);
-        
-        setProcessingState({
-          status: 'completed',
-          progress: 100,
-          message: '캐시된 데이터 로드 완료'
-        });
-        
-        return cachedStore;
-      }
-
-      console.log('새로운 벡터 스토어 생성 시작. 사유:', reason);
-      setProcessingState({
-        status: 'processing',
-        progress: 0,
-        message: '새로운 벡터 스토어 생성 중...'
-      });
-
-      const vectorStore = await processor.processPayrollData(payrollData, employeesData);
-      
-      await manager.saveVectorStore(vectorStore, {
-        payrollData,
-        employeesData
-      });
-
-      setProcessingState({
-        status: 'completed',
-        progress: 100,
-        message: '벡터 스토어 생성 완료'
-      });
-
-      return vectorStore;
-
-    } catch (error) {
-      console.error('벡터 스토어 초기화 실패:', error);
-      setProcessingState({
-        status: 'error',
-        progress: 0,
-        message: '초기화 중 오류 발생'
-      });
-      throw error;
-    }
-  };
-
-  const initialize = async () => {
-    if (isInitializing) return;
-    
-    try {
-      setIsInitializing(true);
-      const apiKey = process.env.REACT_APP_OPENAI_API_KEY;
-      
-      if (!apiKey) {
-        throw new Error('OpenAI API 키가 설정되지 않았습니다.');
-      }
-
-      const processor = new PayrollEmbeddingProcessor(apiKey);
-      setEmbeddingProcessor(processor);
-
-      if (payrollData.length > 0 && employeesData.length > 0) {
-        console.log('벡터 스토어 초기화 시작');
-        const vectorStore = await initializeVectorStore(
-          payrollData, 
-          employeesData, 
-          processor
-        );
-        setVectorStore(vectorStore);
-      }
-
-      const rag = new PayrollRAGSystem(apiKey);
-      setRagSystem(rag);
-
-    } catch (error) {
-      console.error('초기화 실패:', error);
-      setAlert({
-        open: true,
-        message: '시스템 초기화 중 오류가 발생했습니다: ' + error.message,
-        severity: 'error'
-      });
-    } finally {
-      setIsInitializing(false);
-    }
-  };
-
-  useEffect(() => {
-    if (payrollData.length > 0 && employeesData.length > 0 && !isInitializing) {
-      initialize();
-    }
-  }, [payrollData, employeesData]);
-
-  const handleAIQuery = async (query) => {
-    console.group('AI 쿼리 처리 로그');
-    console.log('사용자 쿼리:', query);
-    
-    try {
-      const contextualPrompt = contextManager.generateContextualPrompt(query);
-      console.log('생성된 프롬프트:', contextualPrompt);
-      
-      const result = await ragSystem.processQuery(query, vectorStore, contextualPrompt);
-      console.log('AI 응답:', result);
-      
-      contextManager.addConversation({
-        type: 'user',
-        content: query
-      });
-      
-      contextManager.addConversation({
-        type: 'ai',
-        content: result.response
-      });
-      
-      console.log('현재 대화 기록:', contextManager.conversationHistory);
-    } catch (error) {
-      console.error('AI 쿼리 처리 오류:', error);
-    }
-    
-    console.groupEnd();
-  };
-
-  const AnalysisResult = ({ result }) => {
-    if (!result) return null;
-
-    return (
-      <Box sx={{ mt: 2, p: 2, bgcolor: theme.palette.background.paper, borderRadius: 1 }}>
-        <Typography variant="h6" gutterBottom sx={{ color: theme.palette.text.primary }}>
-          분석 결과
-        </Typography>
-        <Typography variant="body1" sx={{ whiteSpace: 'pre-line', color: theme.palette.text.primary }}>
-          {result.response}
-        </Typography>
-        {result.sources && result.sources.length > 0 && (
-          <Box sx={{ mt: 2 }}>
-            <Typography variant="subtitle2" color={theme.palette.text.secondary}>
-              참조 데이터:
-            </Typography>
-            <List dense>
-              {result.sources.map((source, index) => (
-                <ListItem key={index}>
-                  <ListItemText
-                    primary={`${source.department} - ${source.position}`}
-                    secondary={`데이터 기준일: ${source.payment_date}`}
-                    sx={{
-                      '& .MuiListItemText-primary': { color: theme.palette.text.primary },
-                      '& .MuiListItemText-secondary': { color: theme.palette.text.secondary },
-                    }}
-                  />
-                </ListItem>
-              ))}
-            </List>
-          </Box>
-        )}
-      </Box>
-    );
-  };
-
-  useEffect(() => {
-    checkLangSmithSetup();
-  }, []);
-
-  const [contextManager] = useState(new ContextManager());
-
-  useEffect(() => {
-    if (process.env.NODE_ENV === 'development' && employeesData && payrollData) {
-      import('../../utils/testRAG').then(module => {
-        const testResult = module.testRAGPreprocessing(payrollData, employeesData);
-        console.log('RAG 시스템 테스트 결과:', testResult ? '성공' : '실패');
-      });
-    }
-  }, [employeesData, payrollData]);
 
   return (
     <ThemeProvider theme={theme}>
-      <Box sx={commonStyles.pageContainer}>
-        <GlobalTabs /> {/* GlobalNavigation을 GlobalTabs로 변경 */}
-        <Container maxWidth={false} sx={{ mt: 4, mb: 4 }}>
-          <Grid container spacing={3}>
-            <Grid item xs={12} md={7}>
-              <Box sx={{ 
-                display: 'flex', 
-                alignItems: 'center', 
-                mb: 3,
-                gap: 1
-              }}>
-                <Typography variant="h5" sx={{ fontWeight: 600, color: theme.palette.text.primary }}>
-                  검색
+      <Container maxWidth="xl" sx={{ mt: 3, mb: 8 }}>
+        <GlobalTabs activeTab="payrollAnalysis" />
+        
+        <Typography variant="h4" sx={{ mb: 3, fontWeight: 'bold', color: '#333' }}>
+          급여 분석
+        </Typography>
+        
+        <Grid container spacing={3}>
+          {/* 왼쪽 영역: 검색 필터 */}
+          <Grid item xs={12} md={3}>
+            <StyledPaper elevation={1} sx={{ p: 2, height: '100%' }}>
+              <Typography variant="h6" sx={{ mb: 2, fontWeight: 'bold' }}>
+                검색 필터
+              </Typography>
+              
+              {/* 이름 검색 */}
+              <TextField
+                fullWidth
+                label="직원명"
+                variant="outlined"
+                size="small"
+                value={nameQuery}
+                onChange={(e) => setNameQuery(e.target.value)}
+                margin="normal"
+                placeholder="직원 이름 검색..."
+              />
+              
+              {/* 부서 필터 */}
+              <Typography variant="subtitle2" sx={{ mt: 2, mb: 1, fontWeight: 'bold' }}>
+                부서별 필터
+              </Typography>
+              <FormGroup row>
+                {Object.keys(departmentMap).map((dept) => (
+                  <FormControlLabel
+                    key={dept}
+                    control={
+                      <Checkbox 
+                        checked={departments[departmentMap[dept]]}
+                        onChange={() => handleDepartmentChange(departmentMap[dept])}
+                        size="small"
+                      />
+                    }
+                    label={dept}
+                    sx={{ width: '50%', mr: 0 }}
+                  />
+                ))}
+              </FormGroup>
+              
+              {/* 직급 필터 */}
+              <Typography variant="subtitle2" sx={{ mt: 2, mb: 1, fontWeight: 'bold' }}>
+                직급별 필터
+              </Typography>
+              <FormGroup row>
+                {Object.keys(positions).map((pos) => (
+                  <FormControlLabel
+                    key={pos}
+                    control={
+                      <Checkbox 
+                        checked={positions[pos]}
+                        onChange={() => setPositions({...positions, [pos]: !positions[pos]})}
+                        size="small"
+                      />
+                    }
+                    label={pos}
+                    sx={{ width: '50%', mr: 0 }}
+                  />
+                ))}
+              </FormGroup>
+              
+              {/* 급여 지급 기간 필터 */}
+              <Typography variant="subtitle2" sx={{ mt: 2, mb: 1, fontWeight: 'bold' }}>
+                급여 지급 기간
+              </Typography>
+              
+              {/* 빠른 기간 선택 */}
+              <ButtonGroup size="small" sx={{ mb: 2, display: 'flex' }}>
+                <Button 
+                  variant={quickDateRange === '1m' ? 'contained' : 'outlined'}
+                  onClick={() => setQuickDateFilter('1m')}
+                  sx={{ flex: 1 }}
+                >
+                  1개월
+                </Button>
+                <Button 
+                  variant={quickDateRange === '3m' ? 'contained' : 'outlined'}
+                  onClick={() => setQuickDateFilter('3m')}
+                  sx={{ flex: 1 }}
+                >
+                  3개월
+                </Button>
+                <Button 
+                  variant={quickDateRange === '6m' ? 'contained' : 'outlined'}
+                  onClick={() => setQuickDateFilter('6m')}
+                  sx={{ flex: 1 }}
+                >
+                  6개월
+                </Button>
+                <Button 
+                  variant={quickDateRange === '1y' ? 'contained' : 'outlined'}
+                  onClick={() => setQuickDateFilter('1y')}
+                  sx={{ flex: 1 }}
+                >
+                  1년
+                </Button>
+              </ButtonGroup>
+              
+              {/* 시작일 선택 */}
+              <LocalizationProvider dateAdapter={AdapterDayjs}>
+                <DatePicker
+                  label="시작일"
+                  value={startDate}
+                  onChange={(newValue) => setStartDate(newValue)}
+                  renderInput={(params) => <TextField {...params} fullWidth size="small" margin="normal" />}
+                  sx={datePickerStyle}
+                  format="YYYY-MM-DD"
+                  maxDate={endDate || undefined}
+                />
+                
+                {/* 종료일 선택 */}
+                <DatePicker
+                  label="종료일"
+                  value={endDate}
+                  onChange={(newValue) => setEndDate(newValue)}
+                  renderInput={(params) => <TextField {...params} fullWidth size="small" margin="normal" />}
+                  sx={datePickerStyle}
+                  format="YYYY-MM-DD"
+                  minDate={startDate || undefined}
+                />
+              </LocalizationProvider>
+              
+              {/* 필터 적용 버튼 */}
+              <StyledButton
+                variant="contained"
+                fullWidth
+                sx={{ mt: 2 }}
+                onClick={applyFilters}
+              >
+                검색
+              </StyledButton>
+            </StyledPaper>
+          </Grid>
+          
+          {/* 오른쪽 영역: 검색 결과 및 AI 분석 */}
+          <Grid item xs={12} md={9}>
+            {/* 검색 결과 영역 */}
+            <StyledPaper elevation={1} sx={{ p: 2, mb: 3 }}>
+              <Box sx={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', mb: 2 }}>
+                <Typography variant="h6" sx={{ fontWeight: 'bold' }}>
+                  급여 데이터 검색 결과
                 </Typography>
-                <Box sx={{ 
-                  height: '24px', 
-                  width: '1px', 
-                  bgcolor: 'rgba(0,0,0,0.2)', 
-                  mx: 2 
-                }} />
-                <Typography variant="body2" sx={{ 
-                  color: theme.palette.text.secondary,
-                  fontWeight: 500
-                }}>
-                  급여 데이터 검색 및 필터링
+                <Typography variant="body2">
+                  검색 결과: <strong>{integratedData.length}</strong>건
                 </Typography>
               </Box>
-
-              <StyledPaper sx={{ 
-                p: 2,
-                mb: 3,
-              }}>
-                <Grid container spacing={2}>
-                  <Grid item xs={12} md={3}>
-                    <Typography variant="subtitle2" sx={{ color: theme.palette.text.primary, mb: 0.5, fontWeight: 500 }}>
-                      시작월
-                    </Typography>
-                    <LocalizationProvider dateAdapter={AdapterDayjs}>
-                      <DatePicker
-                        value={startDate}
-                        onChange={handleStartDateChange}
-                        minDate={minDate}
-                        maxDate={endDate}
-                        views={['year', 'month']}
-                        sx={datePickerStyle}
-                      />
-                    </LocalizationProvider>
-                  </Grid>
-
-                  <Grid item xs={12} md={3}>
-                    <Typography variant="subtitle2" sx={{ color: theme.palette.text.primary, mb: 0.5, fontWeight: 500 }}>
-                      종료월
-                    </Typography>
-                    <LocalizationProvider dateAdapter={AdapterDayjs}>
-                      <DatePicker
-                        value={endDate}
-                        onChange={handleEndDateChange}
-                        minDate={startDate}
-                        maxDate={maxDate}
-                        views={['year', 'month']}
-                        sx={datePickerStyle}
-                      />
-                    </LocalizationProvider>
-                  </Grid>
-
-                  <Grid item xs={12} md={3}>
-                    <Typography variant="subtitle2" sx={{ color: theme.palette.text.primary, mb: 0.5, fontWeight: 500 }}>
-                      이름 또는 사번
-                    </Typography>
-                    <SearchInput onSearchChange={handleSearchQueryChange} />
-                  </Grid>
-
-                  <Grid item xs={12} md={3} sx={{ display: 'flex', alignItems: 'flex-end', gap: 1 }}>
-                    <StyledButton
-                      variant="contained"
-                      onClick={handleSearch}
-                      sx={{
-                        flex: 1,
-                        height: '40px',
-                        fontWeight: 600,
-                        fontSize: '0.875rem',
-                      }}
-                    >
-                      검색
-                    </StyledButton>
-                    <StyledButton
-                      variant="contained"
-                      onClick={handleReset}
-                      sx={{
-                        flex: 1,
-                        height: '40px',
-                        fontWeight: 600,
-                        fontSize: '0.875rem',
-                      }}
-                    >
-                      초기화
-                    </StyledButton>
-                  </Grid>
-
-                  <Grid item xs={12}>
-                    <Stack direction="row" spacing={2} sx={{ mt: 1 }}>
-                      <Box sx={{ display: 'flex', alignItems: 'center', mr: 1 }}>
-                        <FormControlLabel
-                          control={
-                            <Checkbox 
-                              checked={allSearch}
-                              onChange={handleAllSearch}
-                              size="small"
-                              sx={{
-                                color: theme.palette.text.secondary,
-                                '&.Mui-checked': { color: theme.palette.primary.main },
-                              }}
-                            />
-                          }
-                          label={<Typography sx={{ color: theme.palette.text.primary, fontWeight: 500, fontSize: '0.75rem' }}>전체 검색</Typography>}
-                        />
-                      </Box>
-
-                      <Box sx={{ flex: 1 }}>
-                        <Typography variant="subtitle2" sx={{ color: theme.palette.text.primary, mb: 0.5, fontWeight: 500, fontSize: '0.75rem' }}>
-                          부서
-                        </Typography>
-                        <Box sx={{ display: 'flex', flexWrap: 'nowrap', gap: 0.5 }}>
-                          {Object.keys(departments).map((dept) => (
-                            <Chip
-                              key={dept}
-                              label={dept}
-                              onClick={() => handleDepartmentChange(dept)}
-                              size="small"
-                              sx={{
-                                height: '24px',
-                                fontSize: '0.75rem',
-                                backgroundColor: departments[dept] ? theme.palette.primary.main : 'rgba(0, 0, 0, 0.15)',
-                                color: theme.palette.text.primary,
-                                '&:hover': {
-                                  backgroundColor: departments[dept] ? theme.palette.primary.main : 'rgba(0, 0, 0, 0.25)',
-                                },
-                                '& .MuiChip-label': {
-                                  padding: '0 8px',
-                                },
-                              }}
-                            />
-                          ))}
-                        </Box>
-                      </Box>
-
-                      <Box sx={{ flex: 1 }}>
-                        <Typography variant="subtitle2" sx={{ color: theme.palette.text.primary, mb: 0.5, fontWeight: 500, fontSize: '0.75rem' }}>
-                          직급
-                        </Typography>
-                        <Box sx={{ display: 'flex', flexWrap: 'nowrap', gap: 0.5 }}>
-                          {Object.keys(positions).map((position) => (
-                            <Chip
-                              key={position}
-                              label={position}
-                              onClick={() => handlePositionChange(position)}
-                              size="small"
-                              sx={{
-                                height: '24px',
-                                fontSize: '0.75rem',
-                                backgroundColor: positions[position] ? theme.palette.primary.main : 'rgba(0, 0, 0, 0.15)',
-                                color: theme.palette.text.primary,
-                                '&:hover': {
-                                  backgroundColor: positions[position] ? theme.palette.primary.main : 'rgba(0, 0, 0, 0.25)',
-                                },
-                                '& .MuiChip-label': {
-                                  padding: '0 8px',
-                                },
-                              }}
-                            />
-                          ))}
-                        </Box>
-                      </Box>
-                    </Stack>
-                  </Grid>
-
-                  <Grid item xs={12}>
-                    <Accordion 
-                      expanded={expandedAdvanced}
-                      onChange={(e, isExpanded) => setExpandedAdvanced(isExpanded)}
-                      sx={{ 
-                        background: 'rgba(0, 0, 0, 0.1)',
-                        color: theme.palette.text.primary,
-                        '&.Mui-expanded': {
-                          background: 'rgba(0, 0, 0, 0.15)',
-                        },
-                      }}
-                    >
-                      <AccordionSummary 
-                        expandIcon={<ExpandMoreIcon sx={{ color: theme.palette.text.primary }} />}
-                        sx={{
-                          minHeight: '40px',
-                          '& .MuiAccordionSummary-content': {
-                            margin: '8px 0',
-                          },
-                          '&:hover': {
-                            background: 'rgba(0, 0, 0, 0.05)',
-                          },
-                        }}
-                      >
-                        <Typography variant="subtitle2" sx={{ fontWeight: 500, fontSize: '0.875rem', color: theme.palette.text.primary }}>
-                          고급 검색 필터
-                        </Typography>
-                      </AccordionSummary>
-                      <AccordionDetails>
-                        <Typography variant="subtitle2" gutterBottom sx={{ color: theme.palette.text.primary, fontWeight: 500, fontSize: '0.875rem' }}>
-                          인력 특성
-                        </Typography>
-                        <LocalizationProvider dateAdapter={AdapterDayjs}>
-                          <DatePicker
-                            label="입사일자 시작"
-                            value={advancedFilters.joinDateRange.start}
-                            onChange={(newValue) => setAdvancedFilters(prev => ({
-                              ...prev,
-                              joinDateRange: { ...prev.joinDateRange, start: newValue }
-                            }))}
-                            views={['year', 'month']}
-                            sx={{
-                              mb: 1,
-                              width: '100%',
-                              '& .MuiInputBase-root': {
-                                height: '40px',
-                                fontSize: '0.875rem',
-                                color: theme.palette.text.primary,
-                              },
-                              '& .MuiInputLabel-root': { 
-                                fontSize: '0.875rem',
-                                color: theme.palette.text.secondary,
-                              },
-                            }}
-                          />
-                          <DatePicker
-                            label="입사일자 종료"
-                            value={advancedFilters.joinDateRange.end}
-                            onChange={(newValue) => setAdvancedFilters(prev => ({
-                              ...prev,
-                              joinDateRange: { ...prev.joinDateRange, end: newValue }
-                            }))}
-                            views={['year', 'month']}
-                            sx={{
-                              mb: 2,
-                              width: '100%',
-                              '& .MuiInputBase-root': {
-                                height: '40px',
-                                fontSize: '0.875rem',
-                                color: theme.palette.text.primary,
-                              },
-                              '& .MuiInputLabel-root': { 
-                                fontSize: '0.875rem',
-                                color: theme.palette.text.secondary,
-                              },
-                            }}
-                          />
-                        </LocalizationProvider>
-
-                        <Typography gutterBottom sx={{ color: theme.palette.text.primary, fontWeight: 500, fontSize: '0.875rem' }}>
-                          근속연수 범위
-                        </Typography>
-                        <Slider
-                          value={advancedFilters.tenureRange}
-                          onChange={(e, newValue) => setAdvancedFilters(prev => ({
-                            ...prev,
-                            tenureRange: newValue
-                          }))}
-                          valueLabelDisplay="auto"
-                          min={0}
-                          max={30}
-                          sx={{
-                            color: theme.palette.primary.main,
-                            mb: 2,
-                            '& .MuiSlider-valueLabel': {
-                              fontSize: '0.75rem',
-                              color: theme.palette.text.primary,
-                              backgroundColor: theme.palette.primary.main,
-                            },
-                          }}
-                        />
-
-                        <FormGroup>
-                          <FormControlLabel
-                            disabled
-                            control={<Checkbox size="small" />}
-                            label={<Typography sx={{ color: theme.palette.text.secondary, fontSize: '0.875rem' }}>평가등급</Typography>}
-                          />
-                          <FormControlLabel
-                            disabled
-                            control={<Checkbox size="small" />}
-                            label={<Typography sx={{ color: theme.palette.text.secondary, fontSize: '0.875rem' }}>인센티브 지급 여부</Typography>}
-                          />
-                          <FormControlLabel
-                            disabled
-                            control={<Checkbox size="small" />}
-                            label={<Typography sx={{ color: theme.palette.text.secondary, fontSize: '0.875rem' }}>승진 이력</Typography>}
-                          />
-                        </FormGroup>
-
-                        <Typography variant="subtitle2" gutterBottom sx={{ color: theme.palette.text.primary, fontWeight: 500, fontSize: '0.875rem', mt: 2 }}>
-                          비용 분석 (준비중)
-                        </Typography>
-                        <FormGroup>
-                          <FormControlLabel
-                            disabled
-                            control={<Checkbox size="small" />}
-                            label={<Typography sx={{ color: theme.palette.text.secondary, fontSize: '0.875rem' }}>프로젝트별 인건비</Typography>}
-                          />
-                          <FormControlLabel
-                            disabled
-                            control={<Checkbox size="small" />}
-                            label={<Typography sx={{ color: theme.palette.text.secondary, fontSize: '0.875rem' }}>부서별 예산 대비 실적</Typography>}
-                          />
-                          <FormControlLabel
-                            disabled
-                            control={<Checkbox size="small" />}
-                            label={<Typography sx={{ color: theme.palette.text.secondary, fontSize: '0.875rem' }}>전년 동기 대비 증감률</Typography>}
-                          />
-                        </FormGroup>
-                      </AccordionDetails>
-                    </Accordion>
-                  </Grid>
-                </Grid>
-                </StyledPaper>
-
-                <StyledPaper sx={{ 
-                  background: 'rgba(255, 255, 255, 0.95)',
-                  backdropFilter: 'blur(12px)',
-                  borderRadius: 2,
-                  border: '1px solid rgba(0, 0, 0, 0.06)',
-                  overflow: 'hidden',
-                  boxShadow: '0 4px 24px rgba(0, 0, 0, 0.1)',
-                  height: 'calc(100vh - 440px)',
-                  display: 'flex',
-                  flexDirection: 'column',
-                }}>
-                  {renderSalaryTabs()}
-                  <TableContainer sx={{ 
-                    flex: 1, 
-                    overflowY: 'auto',
-                    '&::-webkit-scrollbar': {
-                      width: '8px',
-                    },
-                    '&::-webkit-scrollbar-track': {
-                      background: 'rgba(0, 0, 0, 0.1)',
-                    },
-                    '&::-webkit-scrollbar-thumb': {
-                      background: 'rgba(0, 0, 0, 0.1)',
-                      borderRadius: '4px',
-                      '&:hover': {
-                        background: 'rgba(0, 0, 0, 0.2)',
-                      }
-                    }
-                  }}>
-                    <Table size="small" sx={{
-                      '& .MuiTableCell-head': {
-                        background: 'rgba(0, 0, 0, 0.03)',
-                        borderBottom: '1px solid rgba(0, 0, 0, 0.1)',
-                      },
-                      '& .MuiTableCell-body': {
-                        borderBottom: '1px solid rgba(0, 0, 0, 0.05)',
-                      },
-                      '& .MuiTableRow-root:hover': {
-                        background: 'rgba(0, 0, 0, 0.03)',
-                      }
-                    }}>
-                      {renderTableContent()}
-                    </Table>
-                  </TableContainer>
-                  <TablePagination
-                    component="div"
-                    count={transformedData.length}
-                    page={page}
-                    onPageChange={(event, newPage) => setPage(newPage)}
-                    rowsPerPage={rowsPerPage}
-                    rowsPerPageOptions={[20]}
-                    sx={{
-                      color: theme.palette.text.secondary,
-                      borderTop: '1px solid rgba(0, 0, 0, 0.1)',
-                      '.MuiTablePagination-select': {
-                        background: 'rgba(0, 0, 0, 0.2)',
-                      },
-                      '.MuiTablePagination-actions button': {
-                        color: theme.palette.text.secondary,
-                      }
-                    }}
-                  />
-                </StyledPaper>
-              </Grid>
-
-              <Grid item xs={12} md={5}>
-                <Box sx={{ 
-                  display: 'flex', 
-                  alignItems: 'center', 
-                  mb: 3,
-                  gap: 1
-                }}>
-                  <Typography variant="h5" sx={{ fontWeight: 600, color: theme.palette.text.primary }}>
-                    AI 분석
-                  </Typography>
-                  <Box sx={{ 
-                    height: '24px', 
-                    width: '1px', 
-                    bgcolor: 'rgba(0,0,0,0.2)', 
-                    mx: 2 
-                  }} />
-                  <Typography variant="body2" sx={{ 
-                    color: theme.palette.text.secondary,
-                    fontWeight: 500
-                  }}>
-                    실시간 급여 데이터 분석 및 인사이트
-                  </Typography>
-                </Box>
-
-                <StyledPaper sx={{ 
-                  height: 'calc(100vh - 190px)',
-                  p: 2.5,
-                  background: 'rgba(255, 255, 255, 0.95)',
-                  backdropFilter: 'blur(12px)',
-                  borderRadius: 2,
-                  border: '1px solid rgba(0, 0, 0, 0.08)',
-                  boxShadow: '0 4px 24px rgba(0, 0, 0, 0.15)',
-                  display: 'flex',
-                  flexDirection: 'column',
-                }}>
-                  <Box sx={{ 
-                    flex: 1, 
-                    overflowY: 'auto',
-                    mb: 2,
-                    display: 'flex',
-                    flexDirection: 'column',
-                    gap: 2,
-                    p: 2
-                  }}>
-                    {chatMessages.map((message, index) => (
-                      <Box
-                        key={index}
-                        sx={{
-                          alignSelf: message.type === 'user' ? 'flex-end' : 'flex-start',
-                          maxWidth: '80%',
-                          backgroundColor: message.type === 'user' 
-                            ? 'rgba(0, 123, 255, 0.1)' 
-                            : 'rgba(0, 0, 0, 0.05)',
-                          borderRadius: 2,
-                          p: 2,
-                        }}
-                      >
-                        {renderMessage(message)}
-                      </Box>
-                    ))}
-                    {isAiThinking && (
-                      <Box sx={{ alignSelf: 'flex-start', color: theme.palette.text.secondary }}>
-                        <Typography variant="body2">AI가 분석중입니다...</Typography>
-                      </Box>
+              
+              {/* 테이블 */}
+              <TableContainer sx={{ maxHeight: 400 }}>
+                <Table stickyHeader size="small">
+                  <TableHead>
+                    <TableRow>
+                      <TableCell>직원명</TableCell>
+                      <TableCell>부서</TableCell>
+                      <TableCell>직급</TableCell>
+                      <TableCell>지급일</TableCell>
+                      <TableCell align="right">기본급</TableCell>
+                      <TableCell align="right">총급여</TableCell>
+                    </TableRow>
+                  </TableHead>
+                  <TableBody>
+                    {currentPageData.length > 0 ? (
+                      currentPageData.map((row, index) => (
+                        <TableRow key={`${row.employee_id}-${row.payment_date}-${index}`}>
+                          <TableCell>{row.name}</TableCell>
+                          <TableCell>{row.department}</TableCell>
+                          <TableCell>{row.position}</TableCell>
+                          <TableCell>
+                            {dayjs(row.payment_date).format('YYYY-MM-DD')}
+                          </TableCell>
+                          <TableCell align="right">
+                            {Number(row.base_salary).toLocaleString()}원
+                          </TableCell>
+                          <TableCell align="right">
+                            {Number(row.gross_salary).toLocaleString()}원
+                          </TableCell>
+                        </TableRow>
+                      ))
+                    ) : (
+                      <TableRow>
+                        <TableCell colSpan={6} align="center">
+                          {isLoading ? (
+                            <CircularProgress size={24} />
+                          ) : (
+                            '검색 결과가 없습니다.'
+                          )}
+                        </TableCell>
+                      </TableRow>
                     )}
-                  </Box>
-
-                  <AIMessageInput
-                    inputMessage={inputMessage}
-                    onInputChange={handleMessageInput}
-                    onSendMessage={handleSendMessage}
-                    isAiThinking={isAiThinking}
-                  />
-                </StyledPaper>
-              </Grid>
-            </Grid>
-          </Container>
-
-          <Snackbar 
-            open={alert.open} 
-            autoHideDuration={3000} 
-            onClose={handleAlertClose}
-            anchorOrigin={{ vertical: 'top', horizontal: 'center' }}
-          >
-            <Alert 
-              onClose={handleAlertClose} 
-              severity={alert.severity}
-              sx={{ 
-                width: '100%',
-                backgroundColor: alert.severity === 'warning' ? 'rgba(237, 108, 2, 0.9)' : undefined,
-                color: theme.palette.text.primary,
-                '& .MuiAlert-icon': {
-                  color: theme.palette.text.primary
-                }
-              }}
-            >
-              {alert.message}
-            </Alert>
-          </Snackbar>
-          {processingState.status === 'processing' && (
-            <ProcessingProgress {...processingState} />
-          )}
-
-          {isAnalyzing && (
-            <Box sx={{ 
-              position: 'fixed', 
-              bottom: 20, 
-              right: 20, 
-              zIndex: 1000 
-            }}>
-              <CircularProgress size={24} sx={{ color: theme.palette.text.primary }} />
-              <Typography variant="caption" sx={{ ml: 1, color: theme.palette.text.primary }}>
-                데이터 분석 중...
+                  </TableBody>
+                </Table>
+              </TableContainer>
+              
+              {/* 페이지네이션 */}
+              <TablePagination
+                component="div"
+                count={integratedData.length}
+                page={page}
+                onPageChange={handleChangePage}
+                rowsPerPage={rowsPerPage}
+                rowsPerPageOptions={[20]}
+              />
+            </StyledPaper>
+            
+            {/* AI 분석 영역 */}
+            <StyledPaper elevation={1} sx={{ p: 2 }}>
+              <Typography variant="h6" sx={{ mb: 2, fontWeight: 'bold' }}>
+                AI 분석
               </Typography>
-            </Box>
-          )}
-
-          <AnalysisResult result={analysisResult} />
-
-          <Dialog 
-            open={openDialog} 
-            onClose={handleCloseDialog}
-            PaperProps={{
-              sx: {
-                background: theme.palette.background.paper,
-                color: theme.palette.text.primary,
-                minWidth: '300px',
-                border: '1px solid rgba(0, 0, 0, 0.1)',
-                borderRadius: '8px'
-              }
-            }}
-          >
-            <DialogTitle sx={{ 
-              borderBottom: '1px solid rgba(0, 0, 0, 0.1)',
-              fontSize: '1rem',
-              fontWeight: 600,
-              color: theme.palette.text.primary
-            }}>
-              검색된 직원 선택
-            </DialogTitle>
-            <DialogContent sx={{ mt: 2 }}>
-              <List sx={{ pt: 0 }}>
-                {duplicateEmployees.map((employee) => (
-                  <ListItem 
-                    button 
-                    onClick={() => handleEmployeeSelect(employee)}
-                    key={employee.employee_id}
-                    sx={{
-                      borderRadius: '4px',
-                      '&:hover': {
-                        backgroundColor: 'rgba(0, 0, 0, 0.1)'
-                      }
-                    }}
-                  >
-                    <ListItemText
-                      primary={employee.name}
-                      secondary={`${employee.department} / ${employee.position}`}
-                      sx={{
-                        '& .MuiListItemText-primary': {
-                          color: theme.palette.text.primary
-                        },
-                        '& .MuiListItemText-secondary': {
-                          color: theme.palette.text.secondary
-                        }
-                      }}
-                    />
-                  </ListItem>
+              
+              {/* 질문 예시 칩 */}
+              <Box sx={{ mb: 2, display: 'flex', flexWrap: 'wrap', gap: 1 }}>
+                <Typography variant="body2" sx={{ mr: 1, alignSelf: 'center' }}>
+                  질문 예시:
+                </Typography>
+                {[
+                  '부서별 평균 급여는?',
+                  '최고/최저 급여 직원은?',
+                  '지난 3개월간 급여 트렌드',
+                  '직급별 급여 분포는?'
+                ].map((question, i) => (
+                  <Chip
+                    key={i}
+                    label={question}
+                    variant="outlined"
+                    size="small"
+                    onClick={() => setInputMessage(question)}
+                    sx={{ cursor: 'pointer' }}
+                  />
                 ))}
-              </List>
-            </DialogContent>
-            <DialogActions sx={{ borderTop: '1px solid rgba(0, 0, 0, 0.1)' }}>
-              <StyledButton
-                onClick={handleCloseDialog}
-                sx={{ 
-                  color: theme.palette.text.primary,
-                  '&:hover': {
-                    backgroundColor: 'rgba(0, 0, 0, 0.1)'
-                  }
+              </Box>
+              
+              {/* 채팅 메시지 표시 영역 */}
+              <Paper
+                variant="outlined"
+                sx={{
+                  p: 2,
+                  mb: 2,
+                  height: '300px',
+                  overflow: 'auto',
+                  bgcolor: '#fafafa',
+                  borderRadius: 1
                 }}
               >
-                취소
-              </StyledButton>
-            </DialogActions>
-          </Dialog>
-        </Box>
-      </ThemeProvider>
-    );
+                {chatMessages.length === 0 ? (
+                  <Box sx={{ textAlign: 'center', color: 'text.secondary', mt: 10 }}>
+                    <Typography variant="body2">
+                      질문을 입력하여 급여 데이터에 대한 AI 분석을 받아보세요.
+                    </Typography>
+                  </Box>
+                ) : (
+                  chatMessages.map((msg, index) => (
+                    <Box
+                      key={index}
+                      sx={{
+                        mb: 2,
+                        display: 'flex',
+                        flexDirection: 'column',
+                        alignItems: msg.role === 'user' ? 'flex-end' : 'flex-start'
+                      }}
+                    >
+                      <Paper
+                        elevation={0}
+                        sx={{
+                          p: 1.5,
+                          maxWidth: '80%',
+                          bgcolor: msg.role === 'user' ? '#e3f2fd' : '#fff',
+                          borderRadius: 2,
+                          border: '1px solid',
+                          borderColor: msg.role === 'user' ? '#bbdefb' : '#e0e0e0'
+                        }}
+                      >
+                        <Typography variant="body2" sx={{ whiteSpace: 'pre-wrap' }}>
+                          {msg.content}
+                        </Typography>
+                      </Paper>
+                    </Box>
+                  ))
+                )}
+                {isAiThinking && (
+                  <Box sx={{ display: 'flex', ml: 1 }}>
+                    <CircularProgress size={20} sx={{ mr: 1 }} />
+                    <Typography variant="body2" sx={{ color: 'text.secondary' }}>
+                      AI가 분석 중입니다...
+                    </Typography>
+                  </Box>
+                )}
+              </Paper>
+              
+              {/* 입력 컴포넌트 */}
+              <AIMessageInput
+                value={inputMessage}
+                onChange={(e) => setInputMessage(e.target.value)}
+                onSend={() => handleAIQuery(inputMessage)}
+                placeholder="급여 데이터에 대해 질문하세요..."
+                disabled={isAiThinking}
+              />
+            </StyledPaper>
+          </Grid>
+        </Grid>
+        
+        {/* 알림 스낵바 */}
+        <Snackbar
+          open={alert.open}
+          autoHideDuration={6000}
+          onClose={handleAlertClose}
+          anchorOrigin={{ vertical: 'bottom', horizontal: 'center' }}
+        >
+          <Alert onClose={handleAlertClose} severity={alert.severity}>
+            {alert.message}
+          </Alert>
+        </Snackbar>
+      </Container>
+    </ThemeProvider>
+  );
 };
 
 export default PayrollAnalysis;

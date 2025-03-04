@@ -2,32 +2,36 @@ import os
 import re
 import shutil
 
+
 def find_unused_imports_js(file_path):
     """JS 파일에서 사용되지 않는 import 문 탐색"""
-    with open(file_path, 'r', encoding='utf-8') as f:
+    with open(file_path, "r", encoding="utf-8") as f:
         lines = f.readlines()
-    
-    import_pattern = re.compile(r'^import\s+[\w\{\},\s]+from\s+[\'\"]([\w\./-]+)[\'\"]')
+
+    import_pattern = re.compile(r"^import\s+[\w\{\},\s]+from\s+[\'\"]([\w\./-]+)[\'\"]")
     imported_modules = {}
-    
+
     for i, line in enumerate(lines):
         match = import_pattern.match(line)
         if match:
-            module_name = match.group(1).split('/')[-1]
+            module_name = match.group(1).split("/")[-1]
             imported_modules[module_name] = i
-    
-    with open(file_path, 'r', encoding='utf-8') as f:
+
+    with open(file_path, "r", encoding="utf-8") as f:
         content = f.read()
-    
-    unused_imports = {mod: line for mod, line in imported_modules.items() if mod not in content}
-    
+
+    unused_imports = {
+        mod: line for mod, line in imported_modules.items() if mod not in content
+    }
+
     if unused_imports:
-        with open(file_path, 'w', encoding='utf-8') as f:
+        with open(file_path, "w", encoding="utf-8") as f:
             for i, line in enumerate(lines):
                 if i not in unused_imports.values():
                     f.write(line)
-    
+
     return unused_imports
+
 
 def scan_js_files(directory):
     """JS 파일에서 사용되지 않는 import 제거 및 미사용 파일 탐색"""
@@ -43,22 +47,26 @@ def scan_js_files(directory):
 
     return unused_imports_report
 
+
 def find_unused_js_files(directory):
     """사용되지 않는 JavaScript 파일 탐색 후 삭제"""
-    all_js_files = [os.path.join(directory, f) for f in os.listdir(directory) if f.endswith('.js')]
+    all_js_files = [
+        os.path.join(directory, f) for f in os.listdir(directory) if f.endswith(".js")
+    ]
     used_files = set()
-    
+
     for file in all_js_files:
-        with open(file, 'r', encoding='utf-8') as f:
+        with open(file, "r", encoding="utf-8") as f:
             content = f.read()
             for other_file in all_js_files:
-                if os.path.basename(other_file).replace('.js', '') in content:
+                if os.path.basename(other_file).replace(".js", "") in content:
                     used_files.add(other_file)
-    
+
     unused_files = set(all_js_files) - used_files
     for file in unused_files:
         print(f"🗑️ 사용되지 않는 JavaScript 파일 삭제: {file}")
         os.remove(file)
+
 
 def main():
     project_dir = os.path.dirname(os.path.abspath(__file__))
@@ -76,6 +84,7 @@ def main():
 
     find_unused_js_files(project_dir)
     print("✅ JavaScript 코드 정리 완료!")
+
 
 if __name__ == "__main__":
     main()

@@ -29,6 +29,14 @@ import {
   TableRow,
   TableCell,
   IconButton,
+  Badge,
+  Tooltip,
+  List,
+  ListItem,
+  ListItemText,
+  ListItemSecondaryAction,
+  Menu,
+  LinearProgress,
 } from '@mui/material';
 import { DatePicker } from '@mui/x-date-pickers';
 import { AdapterDayjs } from '@mui/x-date-pickers/AdapterDayjs';
@@ -48,6 +56,15 @@ import theme from '../../styles/theme';
 import commonStyles from '../../styles/styles';
 import CheckCircleOutlineIcon from '@mui/icons-material/CheckCircleOutline';
 import WarningIcon from '@mui/icons-material/Warning';
+import EditIcon from '@mui/icons-material/Edit';
+import SaveIcon from '@mui/icons-material/Save';
+import CloseIcon from '@mui/icons-material/Close';
+import NotificationsIcon from '@mui/icons-material/Notifications';
+import BuildIcon from '@mui/icons-material/Build';
+import ReplayIcon from '@mui/icons-material/Replay';
+import SyncIcon from '@mui/icons-material/Sync';
+import RefreshIcon from '@mui/icons-material/Refresh';
+import HistoryIcon from '@mui/icons-material/History';
 
 // dayjs 플러그인 설정
 import isSameOrBefore from 'dayjs/plugin/isSameOrBefore';
@@ -118,6 +135,176 @@ const DATE_PICKER_UI = {
   DAY_BUTTON_SIZE: '36px'     // 일 선택 버튼 크기
 };
 
+// 근태 데이터 변경 뱃지 컴포넌트
+const AttendanceChangesBadge = ({ count, onClick }) => {
+  return (
+    <Tooltip title={`${count}개의 근태 데이터 변경사항이 있습니다`}>
+      <Badge badgeContent={count} color="warning" overlap="circular" 
+        sx={{ 
+          '.MuiBadge-badge': { 
+            fontSize: '0.7rem',
+            height: '20px',
+            minWidth: '20px',
+            top: '4px',
+            right: '4px'
+          }
+        }}
+      >
+        <IconButton 
+          color="primary" 
+          onClick={onClick}
+          sx={{ bgcolor: 'rgba(255, 152, 0, 0.1)', mr: 1 }}
+        >
+          <BuildIcon />
+        </IconButton>
+      </Badge>
+    </Tooltip>
+  );
+};
+
+// 근태 변경 목록 다이얼로그 컴포넌트
+const AttendanceChangesDialog = ({ 
+  open, 
+  onClose, 
+  changedRecords, 
+  originalRecords, 
+  onSave, 
+  onRevert 
+}) => {
+  // 원본과 변경된 값 차이 확인 함수
+  const getChangeDiff = (original, modified, field) => {
+    if (!original) return { hasChange: true, original: '없음', modified: modified[field] || '없음' };
+    
+    const originalValue = original[field] || '없음';
+    const modifiedValue = modified[field] || '없음';
+    
+    return {
+      hasChange: originalValue !== modifiedValue,
+      original: originalValue,
+      modified: modifiedValue
+    };
+  };
+  
+  // 개별 레코드 복원 처리
+  const handleRevertRecord = (employeeId, date) => {
+    onRevert(employeeId, date);
+  };
+  
+  return (
+    <Dialog open={open} onClose={onClose} maxWidth="md" fullWidth>
+      <DialogTitle>
+        <Box display="flex" alignItems="center" justifyContent="space-between">
+          <Typography variant="h6">
+            근태 데이터 변경사항 ({changedRecords.length}개)
+          </Typography>
+          <Button 
+            startIcon={<SaveIcon />} 
+            variant="contained" 
+            color="primary" 
+            onClick={onSave}
+            disabled={changedRecords.length === 0}
+          >
+            모든 변경사항 저장
+          </Button>
+        </Box>
+      </DialogTitle>
+      <DialogContent dividers>
+        {changedRecords.length === 0 ? (
+          <Alert severity="info">변경된 근태 데이터가 없습니다.</Alert>
+        ) : (
+          <List>
+            {changedRecords.map((record, index) => {
+              const original = originalRecords.find(
+                r => r.employee_id === record.employee_id && r.date === record.date
+              );
+              
+              const checkInDiff = getChangeDiff(original, record, 'check_in');
+              const checkOutDiff = getChangeDiff(original, record, 'check_out');
+              const typeDiff = getChangeDiff(original, record, 'attendance_type');
+              
+              return (
+                <React.Fragment key={`${record.employee_id}-${record.date}`}>
+                  {index > 0 && <Divider variant="inset" component="li" />}
+                  <ListItem alignItems="flex-start">
+                    <ListItemText
+                      primary={
+                        <Box display="flex" alignItems="center" mb={1}>
+                          <Typography variant="subtitle1" fontWeight="bold">
+                            {record.employee_id} - {record.date}
+                          </Typography>
+                          <Chip 
+                            label="변경됨" 
+                            color="warning" 
+                            size="small"
+                            sx={{ ml: 1, height: '20px' }}
+                          />
+                        </Box>
+                      }
+                      secondary={
+                        <Box>
+                          {checkInDiff.hasChange && (
+                            <Typography variant="body2" component="div">
+                              출근시간: <s>{checkInDiff.original}</s> → <strong>{checkInDiff.modified}</strong>
+                            </Typography>
+                          )}
+                          {checkOutDiff.hasChange && (
+                            <Typography variant="body2" component="div">
+                              퇴근시간: <s>{checkOutDiff.original}</s> → <strong>{checkOutDiff.modified}</strong>
+                            </Typography>
+                          )}
+                          {typeDiff.hasChange && (
+                            <Typography variant="body2" component="div">
+                              근태유형: <s>{typeDiff.original}</s> → <strong>{typeDiff.modified}</strong>
+                            </Typography>
+                          )}
+                        </Box>
+                      }
+                    />
+                    <ListItemSecondaryAction>
+                      <Tooltip title="변경 취소">
+                        <IconButton 
+                          edge="end" 
+                          onClick={() => handleRevertRecord(record.employee_id, record.date)}
+                        >
+                          <ReplayIcon />
+                        </IconButton>
+                      </Tooltip>
+                    </ListItemSecondaryAction>
+                  </ListItem>
+                </React.Fragment>
+              );
+            })}
+          </List>
+        )}
+      </DialogContent>
+      <DialogActions>
+        <Button onClick={onClose} color="primary">
+          닫기
+        </Button>
+      </DialogActions>
+    </Dialog>
+  );
+};
+
+// ProgressBar 컴포넌트 추가 (컴포넌트 정의 섹션에 추가)
+const ProgressBar = ({ value, message }) => {
+  return (
+    <Box sx={{ position: 'relative', display: 'flex', flexDirection: 'column', alignItems: 'center', width: '100%', mt: 2 }}>
+      <Box sx={{ width: '100%', mr: 1 }}>
+        <LinearProgress variant="determinate" value={value} sx={{ height: 10, borderRadius: 5 }} />
+      </Box>
+      <Box sx={{ minWidth: 35, mt: 1 }}>
+        <Typography variant="body2" color="text.secondary">{`${Math.round(value)}%`}</Typography>
+      </Box>
+      {message && (
+        <Typography variant="caption" sx={{ mt: 1, textAlign: 'center' }}>
+          {message}
+        </Typography>
+      )}
+    </Box>
+  );
+};
+
 const PayrollPayment = () => {
   const { employees, loading: employeesLoading, error } = useEmployees();
   const [selectedEmployees, setSelectedEmployees] = useState([]);
@@ -128,12 +315,25 @@ const PayrollPayment = () => {
   });
   const [payrollData, setPayrollData] = useState(null);
   const [calculating, setCalculating] = useState(false);
+  const [isLoading, setIsLoading] = useState(false);
   const [alert, setAlert] = useState({ open: false, message: '', severity: 'info' });
   const [attendanceData, setAttendanceData] = useState([]);
+  const [originalAttendanceData, setOriginalAttendanceData] = useState([]);
+  const [modifiedAttendance, setModifiedAttendance] = useState([]);
+  const [hasAttendanceChanges, setHasAttendanceChanges] = useState(false);
   const [calculationResults, setCalculationResults] = useState([]);
   const [isConfirming, setIsConfirming] = useState(false);
   const [confirmedPayrolls, setConfirmedPayrolls] = useState([]);
   const [confirmModalOpen, setConfirmModalOpen] = useState(false);
+  const [attendanceChangesDialogOpen, setAttendanceChangesDialogOpen] = useState(false);
+  const [attendanceFileChanged, setAttendanceFileChanged] = useState(false);
+  const [attendanceLastModified, setAttendanceLastModified] = useState(null);
+  const [calculationProgress, setCalculationProgress] = useState(0);
+  const [progressMessage, setProgressMessage] = useState('');
+  const [showProgressBar, setShowProgressBar] = useState(false);
+  const [attendanceAuditData, setAttendanceAuditData] = useState([]);
+  const [auditDialogOpen, setAuditDialogOpen] = useState(false);
+  const [auditLoading, setAuditLoading] = useState(false);
 
   // 컴포넌트 마운트 시 기본값 설정
   useEffect(() => {
@@ -146,6 +346,9 @@ const PayrollPayment = () => {
       end: lastDay, 
       type: QUICK_PERIODS.CURRENT_MONTH 
     });
+    
+    // 근태 파일 변경 여부 확인
+    checkAttendanceFileChanges();
   }, []);
 
   useEffect(() => {
@@ -154,18 +357,187 @@ const PayrollPayment = () => {
         const response = await fetch('http://localhost:5000/api/attendance');
         if (!response.ok) throw new Error('근태 데이터 로드 실패');
         const data = await response.json();
-        setAttendanceData(data.map(record => ({
+        const formattedData = data.map(record => ({
           ...record,
           check_in: record.check_in || '',
           check_out: record.check_out || '',
           attendance_type: record.attendance_type || '정상',
-        })) || []);
+        })) || [];
+        
+        setAttendanceData(formattedData);
+        // 원본 데이터도 저장 (변경 감지용)
+        setOriginalAttendanceData(JSON.parse(JSON.stringify(formattedData)));
       } catch (err) {
         setAlert({ open: true, message: `근태 데이터 로드 오류: ${err.message}`, severity: 'error' });
       }
     };
     fetchAttendance();
   }, []);
+
+  // 근태 파일 변경 확인 함수
+  const checkAttendanceFileChanges = async () => {
+    try {
+      const response = await fetch('http://localhost:5000/api/attendance/check-changes');
+      if (!response.ok) {
+        throw new Error('근태 파일 변경 확인 실패');
+      }
+      
+      const data = await response.json();
+      setAttendanceFileChanged(data.changes_detected);
+      setAttendanceLastModified(data.last_modified);
+      
+      if (data.changes_detected) {
+        // 변경 사항이 감지되면 알림 표시
+        setAlert({
+          open: true,
+          message: '근태 파일이 변경되었습니다. 급여 계산 시 최신 데이터가 반영됩니다.',
+          severity: 'info'
+        });
+      }
+    } catch (err) {
+      console.error('근태 파일 변경 확인 오류:', err);
+    }
+  };
+  
+  // 근태 파일 수동 동기화 함수
+  const syncAttendanceFile = async () => {
+    try {
+      setIsLoading(true);
+      const response = await fetch('http://localhost:5000/api/attendance/sync-file', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' }
+      });
+      
+      if (!response.ok) {
+        const errorData = await response.json();
+        throw new Error(errorData.error || '근태 파일 동기화 실패');
+      }
+      
+      const result = await response.json();
+      
+      // 동기화 후 근태 데이터 다시 로드
+      await fetchAttendance();
+      
+      setAttendanceFileChanged(false);
+      setAttendanceLastModified(result.last_modified);
+      
+      setAlert({
+        open: true,
+        message: result.message,
+        severity: 'success'
+      });
+    } catch (err) {
+      console.error('근태 파일 동기화 오류:', err);
+      setAlert({
+        open: true,
+        message: `근태 파일 동기화 오류: ${err.message}`,
+        severity: 'error'
+      });
+    } finally {
+      setIsLoading(false);
+    }
+  };
+
+  // 근태 데이터 변경 감지 및 추적 함수
+  const updateAttendance = (employeeId, date, field, value) => {
+    // 현재 근태 데이터 복사
+    const updatedAttendance = [...attendanceData];
+    
+    // 해당 직원의 해당 날짜 근태 기록 찾기
+    const recordIndex = updatedAttendance.findIndex(
+      record => record.employee_id === employeeId && record.date === date
+    );
+    
+    if (recordIndex !== -1) {
+      // 기존 기록 업데이트
+      updatedAttendance[recordIndex] = {
+        ...updatedAttendance[recordIndex],
+        [field]: value
+      };
+    } else {
+      // 새 기록 추가
+      updatedAttendance.push({
+        employee_id: employeeId,
+        date: date,
+        [field]: value,
+        // 다른 필드 기본값 설정
+        check_in: field === 'check_in' ? value : '',
+        check_out: field === 'check_out' ? value : '',
+        attendance_type: field === 'attendance_type' ? value : '정상'
+      });
+    }
+    
+    // 상태 업데이트
+    setAttendanceData(updatedAttendance);
+    
+    // 변경된 데이터 추적
+    const originalRecord = originalAttendanceData.find(
+      record => record.employee_id === employeeId && record.date === date
+    );
+    
+    const updatedRecord = updatedAttendance[recordIndex !== -1 ? recordIndex : updatedAttendance.length - 1];
+    const isModified = !originalRecord || 
+      originalRecord.check_in !== updatedRecord.check_in || 
+      originalRecord.check_out !== updatedRecord.check_out || 
+      originalRecord.attendance_type !== updatedRecord.attendance_type;
+    
+    if (isModified) {
+      // 이미 변경된 기록 목록에 있는지 확인
+      const modifiedIndex = modifiedAttendance.findIndex(
+        record => record.employee_id === employeeId && record.date === date
+      );
+      
+      if (modifiedIndex !== -1) {
+        // 기존 변경사항 업데이트
+        const updatedChanges = [...modifiedAttendance];
+        updatedChanges[modifiedIndex] = updatedRecord;
+        setModifiedAttendance(updatedChanges);
+      } else {
+        // 새 변경사항 추가
+        setModifiedAttendance([...modifiedAttendance, updatedRecord]);
+      }
+      
+      setHasAttendanceChanges(true);
+    }
+  };
+
+  // 근태 데이터 변경사항 서버로 전송
+  const saveAttendanceChanges = async () => {
+    if (!modifiedAttendance.length) {
+      return false; // 변경된 데이터가 없으면 무시
+    }
+    
+    try {
+      const response = await fetch('http://localhost:5000/api/attendance/update', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ attendance_data: modifiedAttendance })
+      });
+      
+      if (!response.ok) {
+        const errorData = await response.json();
+        throw new Error(errorData.error || '근태 데이터 업데이트 실패');
+      }
+      
+      const result = await response.json();
+      console.log('근태 데이터 업데이트 성공:', result);
+      
+      // 업데이트 후 상태 초기화
+      setOriginalAttendanceData(JSON.parse(JSON.stringify(attendanceData)));
+      setModifiedAttendance([]);
+      setHasAttendanceChanges(false);
+      
+      return true;
+    } catch (err) {
+      console.error('근태 데이터 업데이트 오류:', err);
+      setAlert({ 
+        open: true, 
+        message: `근태 데이터 업데이트 오류: ${err.message}`, 
+        severity: 'error' 
+      });
+      return false;
+    }
+  };
 
   // 기간 변경 핸들러 (임시 업데이트용)
   const handlePeriodChange = (type, date) => {
@@ -266,50 +638,168 @@ const PayrollPayment = () => {
       return;
     }
 
+    // 계산 전 근태 파일 변경 확인
+    await checkAttendanceFileChanges();
+
+    // 근태 변경 확인 및 처리
+    let attendanceUpdateSuccess = true;
+    let forceRecalculate = false;
+    
+    // 근태 파일이 변경되었으면 동기화 확인
+    if (attendanceFileChanged) {
+      const userConfirmed = window.confirm(
+        '근태 파일이 변경되었습니다. 데이터베이스를 최신 상태로 동기화하시겠습니까?'
+      );
+      
+      if (userConfirmed) {
+        await syncAttendanceFile();
+        forceRecalculate = true;
+      }
+    }
+    
+    // UI에서 근태 데이터 변경이 있으면 먼저 저장 시도
+    if (hasAttendanceChanges) {
+      attendanceUpdateSuccess = await saveAttendanceChanges();
+      if (attendanceUpdateSuccess) {
+        forceRecalculate = true;
+      }
+    }
+
+    // 근태 데이터 저장에 실패했지만 계속 진행을 원하는지 확인
+    if (!attendanceUpdateSuccess) {
+      const continueAnyway = window.confirm(
+        '근태 데이터 업데이트에 실패했습니다. 기존 데이터로 계속 진행하시겠습니까?'
+      );
+      if (!continueAnyway) {
+        return;
+      }
+    }
+
     setCalculating(true);
+    setCalculationProgress(0);
+    setProgressMessage('급여 계산을 시작합니다...');
+    setShowProgressBar(true);
+    
     try {
-      const payload = {
+      // 계산 요청 데이터 준비
+      const requestData = {
         start_date: selectedPeriod.start.format('YYYY-MM-DD'),
         end_date: selectedPeriod.end.format('YYYY-MM-DD'),
         employee_ids: selectedEmployees,
-        attendance_data: attendanceData
+        attendance_data: attendanceData,
+        // 항상 재계산하도록 설정
+        force_recalculate: true
       };
+      
+      console.log('급여 계산 요청 데이터:', requestData);
+      
+      // 스트리밍 응답을 처리하기 위한 fetch 요청
       const response = await fetch('http://localhost:5000/api/payroll/calculate', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(payload)
+        headers: {
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify(requestData),
       });
+
       if (!response.ok) {
         const errorData = await response.json();
         throw new Error(errorData.error || '급여 계산 실패');
       }
-      const data = await response.json();
       
-      // 계산 결과를 저장할 때 status 필드 유지 확인
-      // 각 결과 항목에 status 필드가 없는 경우 백엔드에서 제공된 status를 사용
-      // 그렇지 않으면 기본값 'unconfirmed' 설정
-      const resultsWithStatus = data.results.map(result => {
-        // 백엔드에서 이미 status 필드를 포함한 경우 그대로 사용
-        if (result.status) {
-          return result;
+      // 스트리밍 응답 처리를 위한 reader 설정
+      const reader = response.body.getReader();
+      const decoder = new TextDecoder();
+      let calculationResults = [];
+      
+      while (true) {
+        const { value, done } = await reader.read();
+        
+        if (done) {
+          break;
         }
-        // 기존 confirmPayrolls 중에서 일치하는 항목이 있는지 확인
-        const existingPayroll = confirmedPayrolls.find(
-          p => p.employee_id === result.employee_id
-        );
-        // 일치하는 항목이 있으면 해당 상태 사용, 없으면 기본값
-        return {
-          ...result,
-          status: existingPayroll ? 'confirmed' : 'unconfirmed'
-        };
-      });
+        
+        // 디코딩 후 라인별로 처리
+        const text = decoder.decode(value);
+        const lines = text.split('\n').filter(line => line.trim() !== '');
+        
+        for (const line of lines) {
+          try {
+            const data = JSON.parse(line);
+            console.log('서버 응답 라인:', data);
+            
+            // 진행 상태 업데이트
+            if (data.status === 'progress') {
+              setCalculationProgress(data.progress);
+              setProgressMessage(data.message);
+            } 
+            // 계산 로그 처리 (새로 추가)
+            else if (data.status === 'calculation_logs') {
+              console.group(`급여 계산 결과 - 직원 ID: ${data.employee_id}`);
+              if (data.logs && Array.isArray(data.logs)) {
+                data.logs.forEach(log => console.log(log));
+              }
+              console.groupEnd();
+            }
+            // 오류 메시지 처리
+            else if (data.status === 'error') {
+              console.error('급여 계산 중 오류:', data.message);
+              setAlert({
+                open: true,
+                message: `계산 중 오류 발생: ${data.message}`,
+                severity: 'warning'
+              });
+            } 
+            // 최종 완료 처리
+            else if (data.status === 'complete') {
+              setCalculationProgress(100);
+              setProgressMessage(data.message);
+              
+              // 계산 결과 저장
+              if (data.data && Array.isArray(data.data)) {
+                calculationResults = data.data;
+                console.log('최종 계산 결과:', calculationResults);
+              }
+            }
+          } catch (e) {
+            console.error('응답 파싱 오류:', e, line);
+          }
+        }
+      }
       
-      setCalculationResults(resultsWithStatus);
-      setAlert({ open: true, message: '급여 계산 완료', severity: 'success' });
+      // 계산 결과가 있으면 상태 업데이트
+      if (calculationResults.length > 0) {
+        // 각 결과 항목에 status 필드가 없는 경우 기본값 'unconfirmed' 설정
+        const resultsWithStatus = calculationResults.map(result => {
+          if (result.status) {
+            return result;
+          }
+          
+          // 기존 confirmPayrolls 중에서 일치하는 항목이 있는지 확인
+          const existingPayroll = confirmedPayrolls.find(
+            p => p.employee_id === result.employee_id
+          );
+          
+          // 일치하는 항목이 있으면 해당 상태 사용, 없으면 기본값
+          return {
+            ...result,
+            status: existingPayroll ? 'confirmed' : 'unconfirmed'
+          };
+        });
+        
+        setCalculationResults(resultsWithStatus);
+        setAlert({ open: true, message: '급여 계산 완료', severity: 'success' });
+      } else {
+        throw new Error('계산된 급여 데이터가 없습니다.');
+      }
     } catch (err) {
       setAlert({ open: true, message: `계산 오류: ${err.message}`, severity: 'error' });
     } finally {
       setCalculating(false);
+      // 약간의 지연 후 진행 표시줄 숨김 (사용자에게 100% 완료를 보여주기 위해)
+      setTimeout(() => {
+        setShowProgressBar(false);
+      }, 1000);
     }
   };
 
@@ -424,6 +914,127 @@ const PayrollPayment = () => {
     setAlert({ ...alert, open: false });
   };
 
+  // 근태 데이터 편집 함수 수정
+  const handleAttendanceEdit = (record, updatedData) => {
+    // 근태 데이터 업데이트 로직
+    const updatedAttendance = attendanceData.map(item => {
+      if (item.employee_id === record.employee_id && item.date === record.date) {
+        return { ...item, ...updatedData };
+      }
+      return item;
+    });
+    
+    setAttendanceData(updatedAttendance);
+    setHasAttendanceChanges(true); // 데이터가 수정되었음을 표시
+    
+    // 원본 데이터와 변경된 데이터를 추적
+    const original = attendanceData.find(item => 
+      item.employee_id === record.employee_id && item.date === record.date
+    );
+    
+    // 변경 내역을 attendanceChanges에 저장
+    if (original) {
+      const changes = {
+        ...record,
+        original: {
+          check_in: original.check_in || '',
+          check_out: original.check_out || '',
+          attendance_type: original.attendance_type || '정상'
+        },
+        modified: {
+          check_in: updatedData.check_in || original.check_in || '',
+          check_out: updatedData.check_out || original.check_out || '',
+          attendance_type: updatedData.attendance_type || original.attendance_type || '정상'
+        }
+      };
+      
+      // 이미 변경 내역이 있는지 확인
+      const existingChangeIndex = modifiedAttendance.findIndex(change => 
+        change.employee_id === record.employee_id && change.date === record.date
+      );
+      
+      if (existingChangeIndex >= 0) {
+        // 기존 변경 내역 업데이트
+        const updatedChanges = [...modifiedAttendance];
+        updatedChanges[existingChangeIndex] = changes;
+        setModifiedAttendance(updatedChanges);
+      } else {
+        // 새로운 변경 내역 추가
+        setModifiedAttendance([...modifiedAttendance, changes]);
+      }
+    }
+    
+    message.success("근태 데이터가 수정되었습니다. 급여 계산 시 적용됩니다.");
+  };
+
+  // 근태 변경 다이얼로그 열기
+  const handleOpenAttendanceChangesDialog = () => {
+    setAttendanceChangesDialogOpen(true);
+  };
+
+  // 근태 변경 다이얼로그 닫기
+  const handleCloseAttendanceChangesDialog = () => {
+    setAttendanceChangesDialogOpen(false);
+  };
+
+  // 근태 변경 이력 조회 함수 추가
+  const fetchAttendanceAudit = async (employeeId = null, fromDate = null, toDate = null) => {
+    setAuditLoading(true);
+    try {
+      // API URL 구성 - 선택적 필터링 파라미터 추가
+      let url = 'http://localhost:5000/api/attendance/audit';
+      const params = new URLSearchParams();
+      
+      if (employeeId) params.append('employee_id', employeeId);
+      if (fromDate) params.append('from_date', fromDate);
+      if (toDate) params.append('to_date', toDate);
+      
+      if (params.toString()) {
+        url += `?${params.toString()}`;
+      }
+      
+      const response = await fetch(url);
+      
+      if (!response.ok) {
+        throw new Error('근태 변경 이력 조회 실패');
+      }
+      
+      const data = await response.json();
+      setAttendanceAuditData(data.audit_records || []);
+    } catch (err) {
+      console.error('근태 변경 이력 조회 오류:', err);
+      setAlert({
+        open: true,
+        message: `근태 변경 이력 조회 오류: ${err.message}`,
+        severity: 'error'
+      });
+    } finally {
+      setAuditLoading(false);
+    }
+  };
+  
+  // 변경 이력 대화상자 열기
+  const handleOpenAuditDialog = async () => {
+    // 현재 선택된 기간에 해당하는 변경 이력 조회
+    if (selectedPeriod.start && selectedPeriod.end) {
+      await fetchAttendanceAudit(
+        null, 
+        selectedPeriod.start.format('YYYY-MM-DD'),
+        selectedPeriod.end.format('YYYY-MM-DD')
+      );
+    } else {
+      // 기간 선택이 없으면 모든 이력 조회
+      await fetchAttendanceAudit();
+    }
+    
+    setAuditDialogOpen(true);
+  };
+  
+  // 변경 이력 대화상자 닫기
+  const handleCloseAuditDialog = () => {
+    setAuditDialogOpen(false);
+  };
+
   if (employeesLoading) {
     return (
       <Box sx={{ display: 'flex', justifyContent: 'center', alignItems: 'center', minHeight: '100vh', ...commonStyles.pageContainer }}>
@@ -445,9 +1056,20 @@ const PayrollPayment = () => {
       <Box sx={commonStyles.pageContainer}>
         <GlobalTabs />
         <Container maxWidth="xl" sx={{ mt: 4, mb: 4 }}>
-          <Typography variant="h4" gutterBottom sx={{ fontWeight: 600, color: theme.palette.text.primary }}>
-            급여 지급관리
-          </Typography>
+          <Box display="flex" justifyContent="space-between" alignItems="center" mb={2}>
+            <Typography variant="h4" gutterBottom sx={{ fontWeight: 600, color: theme.palette.text.primary }}>
+              급여 지급관리
+            </Typography>
+            
+            {/* 근태 데이터 변경 뱃지 추가 */}
+            {hasAttendanceChanges && (
+              <AttendanceChangesBadge 
+                count={modifiedAttendance.length} 
+                onClick={handleOpenAttendanceChangesDialog} 
+              />
+            )}
+          </Box>
+          
           <Typography variant="body1" sx={{ color: theme.palette.text.secondary, mb: 4 }}>
             근태기록 기반 급여 계산 및 급여 명세서 발행을 관리합니다.
           </Typography>
@@ -700,6 +1322,30 @@ const PayrollPayment = () => {
                     </Typography>
                   </Box>
                 )}
+                
+                {/* 근태 변경 이력 및 동기화 버튼 추가 */}
+                <Box sx={{ mt: 2, display: 'flex', justifyContent: 'space-between' }}>
+                  <Button
+                    variant="outlined"
+                    color="info"
+                    startIcon={<HistoryIcon />}
+                    onClick={handleOpenAuditDialog}
+                    sx={{ mr: 1 }}
+                  >
+                    근태 변경 이력
+                  </Button>
+                  
+                  {attendanceFileChanged && (
+                    <Button
+                      variant="contained"
+                      color="warning"
+                      startIcon={<SyncIcon />}
+                      onClick={syncAttendanceFile}
+                    >
+                      근태 파일 동기화
+                    </Button>
+                  )}
+                </Box>
               </StyledPaper>
             </Grid>
 
@@ -713,9 +1359,38 @@ const PayrollPayment = () => {
 
             <Grid item xs={12}>
               <StyledPaper>
-                <Box sx={{ display: 'flex', justifyContent: 'space-between', mb: 2 }}>
-                  <Typography variant="h6">급여 계산 결과</Typography>
-                  <Box sx={{ display: 'flex', gap: 2 }}>
+                <Box mb={2} display="flex" justifyContent="space-between" alignItems="center">
+                  <Typography variant="h6">급여 계산 및 지급</Typography>
+                  <Box>
+                    {hasAttendanceChanges && (
+                      <Badge 
+                        badgeContent={modifiedAttendance.length} 
+                        color="warning" 
+                        sx={{ mr: 2 }}
+                        onClick={handleOpenAttendanceChangesDialog}
+                      >
+                        <Button
+                          startIcon={<WarningIcon />}
+                          variant="outlined"
+                          color="warning"
+                          size="small"
+                        >
+                          근태 변경사항
+                        </Button>
+                      </Badge>
+                    )}
+                    {attendanceFileChanged && (
+                      <Button
+                        startIcon={<SyncIcon />}
+                        variant="outlined"
+                        color="primary"
+                        size="small"
+                        onClick={syncAttendanceFile}
+                        sx={{ mr: 2 }}
+                      >
+                        근태 파일 동기화
+                      </Button>
+                    )}
                     <StyledButton
                       variant="contained"
                       onClick={handleCalculatePayroll}
@@ -723,8 +1398,6 @@ const PayrollPayment = () => {
                     >
                       {calculating ? <CircularProgress size={24} /> : '급여 계산'}
                     </StyledButton>
-                    
-                    {/* 급여명세서 발송 버튼 추가 */}
                     <StyledButton
                       variant="outlined"
                       onClick={handleOpenConfirmModal}
@@ -732,12 +1405,13 @@ const PayrollPayment = () => {
                       sx={{
                         backgroundColor: 'white',
                         color: theme.palette.primary.main,
+                        marginLeft: 2,
                         '&:hover': {
                           backgroundColor: 'rgba(0, 0, 0, 0.05)',
                         },
                       }}
                     >
-                      {calculating ? <CircularProgress size={24} /> : '급여 확정'}
+                      {isConfirming ? <CircularProgress size={24} /> : '급여 확정'}
                     </StyledButton>
                   </Box>
                 </Box>
@@ -815,6 +1489,16 @@ const PayrollPayment = () => {
           </DialogActions>
         </Dialog>
 
+        {/* 근태 변경 다이얼로그 */}
+        <AttendanceChangesDialog 
+          open={attendanceChangesDialogOpen}
+          onClose={handleCloseAttendanceChangesDialog}
+          changedRecords={modifiedAttendance}
+          originalRecords={originalAttendanceData}
+          onSave={saveAttendanceChanges}
+          onRevert={handleAttendanceEdit}
+        />
+
         {/* 알림 메시지 */}
         <Snackbar
           open={alert.open}
@@ -831,6 +1515,105 @@ const PayrollPayment = () => {
             {alert.message}
           </Alert>
         </Snackbar>
+
+        {/* 진행 상황 모달 */}
+        <Dialog
+          open={showProgressBar}
+          aria-labelledby="progress-dialog-title"
+          maxWidth="sm"
+          fullWidth
+        >
+          <DialogTitle id="progress-dialog-title">
+            급여 계산 진행 중
+          </DialogTitle>
+          <DialogContent dividers>
+            <Box sx={{ p: 2, display: 'flex', flexDirection: 'column', alignItems: 'center' }}>
+              <Typography variant="h6" sx={{ mb: 2 }}>
+                {progressMessage || '데이터를 처리 중입니다...'}
+              </Typography>
+              <ProgressBar value={calculationProgress} message={`${calculationProgress}% 완료됨`} />
+            </Box>
+          </DialogContent>
+        </Dialog>
+
+        {/* 근태 변경 이력 대화상자 */}
+        <Dialog
+          open={auditDialogOpen}
+          onClose={handleCloseAuditDialog}
+          aria-labelledby="audit-dialog-title"
+          maxWidth="md"
+          fullWidth
+        >
+          <DialogTitle id="audit-dialog-title">
+            <Box display="flex" justifyContent="space-between" alignItems="center">
+              <Typography variant="h6">근태 변경 이력</Typography>
+              <IconButton onClick={handleCloseAuditDialog} size="small">
+                <CloseIcon />
+              </IconButton>
+            </Box>
+          </DialogTitle>
+          <DialogContent dividers>
+            {auditLoading ? (
+              <Box sx={{ display: 'flex', justifyContent: 'center', p: 3 }}>
+                <CircularProgress />
+              </Box>
+            ) : attendanceAuditData.length === 0 ? (
+              <Alert severity="info">변경 이력이 없습니다.</Alert>
+            ) : (
+              <TableContainer component={Paper}>
+                <Table size="small">
+                  <TableHead>
+                    <TableRow>
+                      <TableCell>직원 ID</TableCell>
+                      <TableCell>날짜</TableCell>
+                      <TableCell>변경 항목</TableCell>
+                      <TableCell>이전 값</TableCell>
+                      <TableCell>변경 값</TableCell>
+                      <TableCell>변경 유형</TableCell>
+                      <TableCell>변경자</TableCell>
+                      <TableCell>변경 시간</TableCell>
+                    </TableRow>
+                  </TableHead>
+                  <TableBody>
+                    {attendanceAuditData.map((audit, index) => (
+                      <TableRow key={index}>
+                        <TableCell>{audit.employee_id}</TableCell>
+                        <TableCell>{audit.date}</TableCell>
+                        <TableCell>{audit.field_name}</TableCell>
+                        <TableCell>{audit.old_value || '-'}</TableCell>
+                        <TableCell>{audit.new_value || '-'}</TableCell>
+                        <TableCell>
+                          <Chip 
+                            label={
+                              audit.change_type === 'create' ? '생성' :
+                              audit.change_type === 'update' ? '수정' :
+                              audit.change_type === 'delete' ? '삭제' : 
+                              audit.change_type
+                            }
+                            color={
+                              audit.change_type === 'create' ? 'success' :
+                              audit.change_type === 'update' ? 'info' :
+                              audit.change_type === 'delete' ? 'error' : 
+                              'default'
+                            }
+                            size="small"
+                          />
+                        </TableCell>
+                        <TableCell>{audit.changed_by}</TableCell>
+                        <TableCell>{new Date(audit.changed_at).toLocaleString()}</TableCell>
+                      </TableRow>
+                    ))}
+                  </TableBody>
+                </Table>
+              </TableContainer>
+            )}
+          </DialogContent>
+          <DialogActions>
+            <Button onClick={handleCloseAuditDialog} color="primary">
+              닫기
+            </Button>
+          </DialogActions>
+        </Dialog>
       </Box>
     </ThemeProvider>
   );

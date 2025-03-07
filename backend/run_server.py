@@ -1,9 +1,18 @@
-from flask import Flask, request, jsonify
+from flask import Flask, request, jsonify, Response
 from flask_cors import CORS
 import pandas as pd
 import os
 import json
+import logging
 from datetime import datetime
+
+# 로깅 설정
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s - %(levelname)s - %(message)s",
+    datefmt="%Y-%m-%d %H:%M:%S",
+)
+logger = logging.getLogger(__name__)
 
 # 기존 모듈 임포트
 from utils.pay_calculator import PayCalculator
@@ -11,10 +20,29 @@ from utils.insurance_calculator import InsuranceCalculator
 
 # 새로 추가: 데이터베이스 연결 및 모델 임포트
 from config.database import init_db, get_db_session
-from models.models import Employee, Attendance, Payroll, PayrollAudit, PayrollDocument
+from models.models import (
+    Employee,
+    Attendance,
+    Payroll,
+    PayrollAudit,
+    PayrollDocument,
+    AttendanceAudit,
+)
+
+# 새로 추가: 급여 서비스 임포트
+from app.services.payroll_service import PayrollService
+from config import Config
+
+# PayrollService 객체 초기화
+payroll_service = PayrollService(Config)
 
 app = Flask(__name__)
-CORS(app, resources={r"/api/*": {"origins": "http://localhost:3001"}})
+CORS(
+    app,
+    resources={
+        r"/api/*": {"origins": ["http://localhost:3001", "http://localhost:3000"]}
+    },
+)
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 EMPLOYEES_CSV = os.path.join(BASE_DIR, "data", "employees.csv")
@@ -155,6 +183,7 @@ def load_attendance():
                         "check_in": record.check_in or "",
                         "check_out": record.check_out or "",
                         "attendance_type": record.attendance_type or "정상",
+                        "remarks": record.remarks or "",
                     }
                     for record in attendance_records
                 ]
@@ -168,6 +197,7 @@ def load_attendance():
             print(f"Error: {ATTENDANCE_CSV} 파일이 존재하지 않습니다.")
             return []
 
+        # CSV 파일 존재하고 데이터베이스가 비어있는 경우 자동으로 동기화 시도
         print(f"CSV 파일에서 근태 데이터 로드 중: {ATTENDANCE_CSV}")
         df = pd.read_csv(
             ATTENDANCE_CSV, encoding="utf-8", delimiter=",", on_bad_lines="warn"
@@ -179,12 +209,80 @@ def load_attendance():
             df["attendance_type"].fillna("정상").astype(str).str.strip()
         )
         df["date"] = df["date"].fillna("").astype(str).str.strip()
+        # 비고 필드가 없으면 빈 문자열로 설정
+        if "remarks" not in df.columns:
+            df["remarks"] = ""
+        else:
+            df["remarks"] = df["remarks"].fillna("").astype(str).str.strip()
+
+        data = df.to_dict("records")
+
+        # 데이터베이스에 데이터가 없었던 경우 CSV 데이터를 자동으로 동기화
+        print("데이터베이스가 비어있어 CSV 데이터를 자동으로 동기화합니다...")
+        try:
+            _sync_attendance_to_db(data)
+            print("CSV 데이터가 데이터베이스에 성공적으로 동기화되었습니다.")
+        except Exception as e:
+            print(f"자동 동기화 실패: {e}")
 
         print(f"Loaded {len(df)} attendance records from CSV")
-        return df.to_dict("records")
+        return data
     except Exception as e:
         print(f"Error loading attendance: {e}")
         return []
+
+
+# 새로 추가: 근태 데이터를 데이터베이스에 동기화하는 내부 함수
+def _sync_attendance_to_db(attendance_data):
+    """
+    근태 데이터를 데이터베이스에 동기화하는 내부 함수
+    """
+    if not attendance_data:
+        return 0
+
+    session = get_db_session()
+    try:
+        # 모든 기존 데이터 삭제
+        deleted_count = session.query(Attendance).delete()
+        print(f"{deleted_count}개의 기존 근태 기록이 삭제되었습니다.")
+
+        # 새 데이터 추가
+        records_added = 0
+        for record in attendance_data:
+            try:
+                # 날짜 문자열을 date 객체로 변환
+                if isinstance(record["date"], str):
+                    date_obj = datetime.strptime(record["date"], "%Y-%m-%d").date()
+                else:
+                    date_obj = record["date"]
+
+                # 새 근태 기록 생성
+                attendance = Attendance(
+                    employee_id=record["employee_id"],
+                    date=date_obj,
+                    check_in=record.get("check_in", ""),
+                    check_out=record.get("check_out", ""),
+                    attendance_type=record.get("attendance_type", "정상"),
+                    remarks=record.get("remarks", ""),
+                )
+                session.add(attendance)
+                records_added += 1
+            except Exception as e:
+                print(
+                    f"근태 기록 추가 오류 ({record['employee_id']}, {record['date']}): {e}"
+                )
+                continue
+
+        # 변경사항 커밋
+        session.commit()
+        print(f"{records_added}개의 근태 기록이 DB에 성공적으로 추가되었습니다.")
+        return records_added
+    except Exception as e:
+        session.rollback()
+        print(f"근태 데이터 동기화 오류: {e}")
+        raise
+    finally:
+        session.close()
 
 
 @app.route("/api/employees", methods=["GET"])
@@ -199,242 +297,141 @@ def get_employees():
 def calculate_payroll():
     """
     급여 계산 API
+
+    요청된 직원 ID, 시작 및 종료일에 대한 급여를 계산합니다.
+    근태 기록의 변경 여부를 확인하고 필요한 경우 동기화합니다.
+    진행 상황을 클라이언트에 전달하는 기능을 추가합니다.
     """
-    data = request.json
-    start_date = data.get("start_date")
-    end_date = data.get("end_date")
-    employee_ids = data.get("employee_ids", [])
-    attendance_data = data.get("attendance_data", [])
-
-    if not start_date or not end_date or not employee_ids:
-        return (
-            jsonify({"error": "start_date, end_date, employee_ids는 필수입니다."}),
-            400,
-        )
-
-    employees_df = pd.DataFrame(load_employees())
-    attendance_df = pd.DataFrame(
-        attendance_data if attendance_data else load_attendance()
-    )
-
-    if employees_df.empty or attendance_df.empty:
-        return jsonify({"error": "직원 또는 근태 데이터가 없습니다."}), 404
-
-    results = []
-    pay_calculator = PayCalculator()
-    insurance_calculator = InsuranceCalculator()
-
-    # 데이터베이스 세션 시작
-    session = get_db_session()
-
     try:
-        # 먼저 해당 기간에 이미 확정된 급여가 있는지 확인
-        start_date_obj = datetime.strptime(start_date, "%Y-%m-%d").date()
-        end_date_obj = datetime.strptime(end_date, "%Y-%m-%d").date()
+        # 요청 데이터 처리
+        data = request.json
+        employee_ids = data.get("employee_ids", [])
+        start_date_str = data.get("start_date")
+        end_date_str = data.get("end_date")
+        force_recalculate = data.get("force_recalculate", False)
 
-        existing_payrolls = {}
-        for employee_id in employee_ids:
-            # 해당 직원의 해당 기간 급여 데이터 확인
-            existing_payroll = (
-                session.query(Payroll)
-                .filter(
-                    Payroll.employee_id == employee_id,
-                    Payroll.payment_period_start == start_date_obj,
-                    Payroll.payment_period_end == end_date_obj,
-                    Payroll.status.in_(
-                        ["confirmed", "paid"]
-                    ),  # 확정 또는 지급된 상태만 확인
-                )
-                .first()
+        # 시작일과 종료일 필요
+        if not start_date_str or not end_date_str:
+            return (
+                jsonify({"error": "시작일과 종료일이 필요합니다."}),
+                400,
             )
 
-            if existing_payroll:
-                existing_payrolls[employee_id] = existing_payroll
-
-        for employee_id in employee_ids:
-            if employee_id not in employees_df["employee_id"].values:
-                print(f"Employee ID {employee_id} not found")
-                continue
-
-            employee = employees_df[employees_df["employee_id"] == employee_id].iloc[0]
-            base_salary = employee["base_salary"]
-            dependents = employee["family_count"]
-
-            filtered_attendance = attendance_df[
-                (attendance_df["employee_id"] == employee_id)
-                & (attendance_df["date"] >= start_date)
-                & (attendance_df["date"] <= end_date)
-            ].to_dict("records")
-
-            if not filtered_attendance:
-                print(f"No attendance data for employee {employee_id}")
-                continue
-
-            # 이미 확정된 급여가 있는 경우, 그 데이터를 사용
-            if employee_id in existing_payrolls:
-                existing = existing_payrolls[employee_id]
-                result = {
-                    "payroll_id": existing.id,
-                    "payroll_code": existing.payroll_code,
-                    "employee_id": employee_id,
-                    "employee_name": employee["name"],
-                    "department": employee["department"],
-                    "position": employee["position"],
-                    "basePay": existing.base_pay,
-                    "overtimePay": existing.overtime_pay,
-                    "nightPay": existing.night_shift_pay,
-                    "holidayPay": existing.holiday_pay,
-                    "deductions": {
-                        "nationalPension": existing.national_pension,
-                        "healthInsurance": existing.health_insurance,
-                        "longTermCare": existing.health_insurance
-                        * 0.1025,  # 건강보험의 10.25%
-                        "employmentInsurance": existing.employment_insurance,
-                    },
-                    "taxes": {
-                        "incomeTax": existing.income_tax,
-                        "localIncomeTax": existing.residence_tax,
-                    },
-                    "grossPay": existing.gross_pay,
-                    "totalDeductions": existing.total_deductions,
-                    "netPay": existing.net_pay,
-                    "status": existing.status,  # 이미 확정된 상태 반환
-                    "payment_date": (
-                        existing.payment_date.strftime("%Y-%m-%d")
-                        if existing.payment_date
-                        else None
-                    ),
-                }
-                results.append(result)
-                continue
-
+        # 직원 ID가 없으면 모든 직원 선택
+        if not employee_ids:
+            session = get_db_session()
             try:
-                # 기존 급여 계산 로직 유지
-                gross_salary = pay_calculator.get_total_pay(
-                    base_salary, start_date, end_date, filtered_attendance
+                employees = session.query(Employee).all()
+                employee_ids = [e.id for e in employees]
+            finally:
+                session.close()
+
+        # 근태 데이터 파일 변경 확인 및 동기화
+        try:
+            file_changed = payroll_service.sync_attendance_if_changed()
+            if file_changed:
+                print(
+                    "근태 데이터 파일 변경이 감지되어 데이터베이스와 동기화되었습니다."
                 )
-                basePay = pay_calculator.calculate_base_pay(
-                    base_salary, start_date, end_date, filtered_attendance
-                )
-                overtimePay = pay_calculator.calculate_overtime_pay(
-                    filtered_attendance, (base_salary / 12) / 209
-                )
-                nightPay = pay_calculator.calculate_night_pay(
-                    filtered_attendance, (base_salary / 12) / 209
-                )
-                holidayPay = pay_calculator.calculate_holiday_pay(
-                    filtered_attendance, (base_salary / 12) / 209
-                )
+                force_recalculate = True
+        except Exception as sync_error:
+            print(f"근태 데이터 동기화 중 오류 발생: {sync_error}")
+            # 오류가 발생해도 계속 진행
 
-                deductions = insurance_calculator.calculate_insurances(gross_salary)
-                taxes = insurance_calculator.calculate_taxes(gross_salary, dependents)
-                net_pay = insurance_calculator.get_net_pay(gross_salary, dependents)
-                total_deductions = sum(deductions.values()) + sum(taxes.values())
+        # 요청에 포함된 근태 데이터가 있으면 동기화
+        attendance_data = data.get("attendance_data")
+        if attendance_data:
+            try:
+                payroll_service.sync_attendance_data(attendance_data)
+                force_recalculate = True
+            except Exception as sync_error:
+                print(f"근태 데이터 동기화 중 오류 발생: {sync_error}")
 
-                # 새로 추가: 급여 코드 생성 (예: PR202402001)
-                year_month = datetime.strptime(start_date, "%Y-%m-%d").strftime("%Y%m")
-                payroll_count = session.query(Payroll).count()
-                payroll_code = f"PR{year_month}{payroll_count + 1:03d}"
+        # 클라이언트에게 진행 상황을 전달하기 위한 함수 정의
+        def generate_progress():
+            total_steps = len(employee_ids)
 
-                # 날짜 문자열을 date 객체로 변환 (SQLite 호환성)
-                start_date_obj = datetime.strptime(start_date, "%Y-%m-%d").date()
-                end_date_obj = datetime.strptime(end_date, "%Y-%m-%d").date()
-
-                # 새로 추가: Payroll 객체 생성 및 저장 (날짜 처리 수정)
-                payroll = Payroll(
-                    payroll_code=payroll_code,
-                    employee_id=employee_id,
-                    payment_period_start=start_date_obj,  # 문자열 대신 date 객체 사용
-                    payment_period_end=end_date_obj,  # 문자열 대신 date 객체 사용
-                    base_pay=basePay,  # 기존 변수명 유지
-                    overtime_pay=overtimePay,  # 기존 변수명 유지
-                    night_shift_pay=nightPay,  # 기존 변수명 유지
-                    holiday_pay=holidayPay,  # 기존 변수명 유지
-                    total_allowances=overtimePay + nightPay + holidayPay,
-                    gross_pay=gross_salary,
-                    income_tax=taxes.get("incomeTax", 0),
-                    residence_tax=taxes.get("localIncomeTax", 0),
-                    national_pension=deductions.get("nationalPension", 0),
-                    health_insurance=deductions.get("healthInsurance", 0),
-                    employment_insurance=deductions.get("employmentInsurance", 0),
-                    total_deductions=total_deductions,
-                    net_pay=net_pay,
-                    status="draft",
-                )
-
-                session.add(payroll)
-                session.flush()  # ID 생성을 위해 플러시
-
-                # 새로 추가: 감사 로그 추가
-                audit = PayrollAudit(
-                    action="CREATE",
-                    user_id=request.headers.get("X-User-ID", "system"),
-                    timestamp=datetime.now(),
-                    target_type="payroll",
-                    target_id=payroll_code,
-                    new_value=json.dumps(
-                        {
-                            "employee_id": employee_id,
-                            "payment_period_start": start_date,
-                            "payment_period_end": end_date,
-                            "basePay": basePay,
-                            "overtimePay": overtimePay,
-                            "nightPay": nightPay,
-                            "holidayPay": holidayPay,
-                            "gross_pay": gross_salary,
-                            "total_deductions": total_deductions,
-                            "net_pay": net_pay,
-                            "status": "draft",
-                        }
-                    ),
-                    ip_address=request.remote_addr,
-                )
-
-                session.add(audit)
-
-                # 결과 추가 - 프론트엔드 컴포넌트와 일치하는 필드명으로 응답
-                result = {
-                    "payroll_id": payroll.id,
-                    "payroll_code": payroll_code,
-                    "employee_id": employee_id,
-                    "employee_name": employee["name"],
-                    "department": employee["department"],
-                    "position": employee["position"],
-                    "basePay": basePay,
-                    "overtimePay": overtimePay,
-                    "nightPay": nightPay,
-                    "holidayPay": holidayPay,
-                    "deductions": {
-                        "nationalPension": deductions.get("nationalPension", 0),
-                        "healthInsurance": deductions.get("healthInsurance", 0),
-                        "longTermCare": deductions.get("longTermCare", 0),
-                        "employmentInsurance": deductions.get("employmentInsurance", 0),
-                    },
-                    "taxes": {
-                        "incomeTax": taxes.get("incomeTax", 0),
-                        "localIncomeTax": taxes.get("localIncomeTax", 0),
-                    },
-                    "totalPay": gross_salary,
-                    "netPay": net_pay,
-                    "status": "draft",
+            # 초기 진행 상태 전송
+            yield json.dumps(
+                {
+                    "status": "progress",
+                    "message": "급여 계산을 시작합니다...",
+                    "progress": 0,
+                    "total": total_steps,
                 }
-                results.append(result)
-            except Exception as e:
-                print(f"Error calculating payroll for {employee_id}: {e}")
-                continue
+            ) + "\n"
 
-        # 트랜잭션 커밋
-        session.commit()
+            # 날짜 변환
+            start_date = datetime.strptime(start_date_str, "%Y-%m-%d").date()
+            end_date = datetime.strptime(end_date_str, "%Y-%m-%d").date()
 
-        if not results:
-            return jsonify({"error": "급여 계산 결과가 없습니다."}), 404
+            # 각 직원별로 급여 계산
+            results = []
+            for i, employee_id in enumerate(employee_ids):
+                # 진행 상황 메시지 전송
+                current_progress = int((i / total_steps) * 100)
+                yield json.dumps(
+                    {
+                        "status": "progress",
+                        "message": f"직원 ID {employee_id}의 급여를 계산 중...",
+                        "progress": current_progress,
+                        "total": 100,
+                        "employee_id": employee_id,
+                    }
+                ) + "\n"
 
-        return jsonify({"results": results})
+                try:
+                    # 급여 계산 및 저장
+                    payroll_data = payroll_service.calculate_and_save_payroll(
+                        employee_id, start_date, end_date, force_recalculate
+                    )
+
+                    if payroll_data:
+                        # 계산 로그 추출
+                        calculation_logs = payroll_data.pop("calculation_logs", [])
+
+                        # 계산 로그 전송
+                        if calculation_logs:
+                            yield json.dumps(
+                                {
+                                    "status": "calculation_logs",
+                                    "employee_id": employee_id,
+                                    "logs": calculation_logs,
+                                }
+                            ) + "\n"
+
+                        results.append(payroll_data)
+                    else:
+                        print(
+                            f"직원 ID {employee_id}에 대한 급여 계산 결과가 없습니다."
+                        )
+                except Exception as e:
+                    print(f"직원 ID {employee_id}의 급여 계산 중 오류 발생: {e}")
+                    # 오류가 발생해도 다른 직원 계산 계속 진행
+                    yield json.dumps(
+                        {
+                            "status": "error",
+                            "message": f"직원 ID {employee_id}의 급여 계산 중 오류 발생: {str(e)}",
+                            "employee_id": employee_id,
+                        }
+                    ) + "\n"
+
+            # 최종 결과 전송
+            yield json.dumps(
+                {
+                    "status": "complete",
+                    "message": f"{len(results)}명의 직원에 대한 급여 계산이 완료되었습니다.",
+                    "data": results,
+                    "progress": 100,
+                    "total": 100,
+                }
+            )
+
+        # 스트리밍 응답으로 진행 상황 전달
+        return Response(generate_progress(), mimetype="application/json")
+
     except Exception as e:
-        session.rollback()
-        return jsonify({"error": f"급여 계산 중 오류가 발생했습니다: {str(e)}"}), 500
-    finally:
-        session.close()
+        return jsonify({"error": f"급여 계산 중 오류 발생: {str(e)}"}), 500
 
 
 # 새로 추가: 급여 확정 API 엔드포인트 (날짜 처리 수정)
@@ -442,83 +439,57 @@ def calculate_payroll():
 def confirm_payroll():
     data = request.json
     payroll_ids = data.get("payroll_ids", [])
+    payroll_data = data.get("payroll_data", [])
+    payment_period = data.get("payment_period", {})
     remarks = data.get("remarks", "")
+    payroll_type = data.get("payroll_type", "regular")  # 급여 유형 (기본값: 정기급여)
     user_id = request.headers.get("X-User-ID", "system")
 
-    if not payroll_ids:
-        return jsonify({"error": "확정할 급여 ID가 제공되지 않았습니다."}), 400
+    # payment_period에 필수 키가 있는지 확인하고 없으면 기본값 제공
+    if "start" not in payment_period:
+        # 첫 번째 급여 데이터에서 시작일을 가져오거나 현재 달의 1일을 기본값으로 사용
+        if payroll_data and "payment_period_start" in payroll_data[0]:
+            payment_period["start"] = payroll_data[0]["payment_period_start"]
+        else:
+            payment_period["start"] = datetime.now().replace(day=1).strftime("%Y-%m-%d")
 
-    session = get_db_session()
+    if "end" not in payment_period:
+        # 첫 번째 급여 데이터에서 종료일을 가져오거나 다음 달의 마지막 날을 기본값으로 사용
+        if payroll_data and "payment_period_end" in payroll_data[0]:
+            payment_period["end"] = payroll_data[0]["payment_period_end"]
+        else:
+            # 현재 달의 마지막 날
+            import calendar
+
+            now = datetime.now()
+            last_day = calendar.monthrange(now.year, now.month)[1]
+            payment_period["end"] = now.replace(day=last_day).strftime("%Y-%m-%d")
+
+    # 급여 유형 검증
+    if payroll_type not in ["regular", "special"]:
+        return (
+            jsonify({"error": "급여 유형은 'regular' 또는 'special'이어야 합니다."}),
+            400,
+        )
+
+    # payroll_service를 사용하여 급여 확정
     try:
-        confirmed_payrolls = []
-
-        for payroll_code in payroll_ids:
-            payroll = (
-                session.query(Payroll).filter_by(payroll_code=payroll_code).first()
-            )
-            if not payroll or payroll.status != "draft":
-                continue
-
-            # 이전 상태 저장 (감사 추적용)
-            old_value = {
-                "status": payroll.status,
-                "updated_at": (
-                    payroll.updated_at.isoformat() if payroll.updated_at else None
-                ),
-            }
-
-            # 상태 업데이트
-            payroll.status = "confirmed"
-            payroll.confirmed_at = datetime.now()
-            payroll.confirmed_by = user_id
-            payroll.remarks = remarks
-
-            # 감사 로그 추가
-            audit = PayrollAudit(
-                action="UPDATE_STATUS",
-                user_id=user_id,
-                timestamp=datetime.now(),
-                target_type="payroll",
-                target_id=payroll_code,
-                old_value=json.dumps(old_value),
-                new_value=json.dumps(
-                    {
-                        "status": "confirmed",
-                        "confirmed_at": datetime.now().isoformat(),
-                        "confirmed_by": user_id,
-                        "remarks": remarks,
-                    }
-                ),
-                ip_address=request.remote_addr,
-            )
-
-            session.add(audit)
-            confirmed_payrolls.append(
-                {
-                    "payroll_id": payroll.id,
-                    "payroll_code": payroll_code,
-                    "employee_id": payroll.employee_id,
-                    "confirmed_at": payroll.confirmed_at.isoformat(),
-                }
-            )
-
-        session.commit()
-
-        if not confirmed_payrolls:
-            return jsonify({"warning": "확정된 급여가 없습니다."}), 200
+        confirmed_payrolls = payroll_service.confirm_payroll(
+            payroll_data, payment_period, user_id, payroll_type
+        )
 
         return jsonify(
             {
                 "status": "success",
-                "message": f"{len(confirmed_payrolls)}개 급여가 확정되었습니다.",
+                "message": f"{len(confirmed_payrolls)}건의 급여가 확정되었습니다.",
                 "confirmed_payrolls": confirmed_payrolls,
             }
         )
+    except ValueError as ve:
+        # 중복 기간 오류 등 검증 오류
+        return jsonify({"error": str(ve)}), 400
     except Exception as e:
-        session.rollback()
         return jsonify({"error": f"급여 확정 중 오류가 발생했습니다: {str(e)}"}), 500
-    finally:
-        session.close()
 
 
 # 새로 추가: 급여 지급 처리 API 엔드포인트 (날짜 처리 수정)
@@ -621,6 +592,10 @@ def get_payroll_records():
         "status"
     )  # draft, confirmed, paid 또는 comma로 구분된 여러 상태
 
+    print(
+        f"급여 기록 요청: employee_id={employee_id}, status={status}, start_date={start_date}, end_date={end_date}"
+    )
+
     # 데이터베이스 세션 시작
     session = get_db_session()
 
@@ -646,26 +621,21 @@ def get_payroll_records():
 
         # 결과 가져오기
         payrolls = query.all()
+        print(f"급여 기록 조회 결과: {len(payrolls)}건")
 
         # 직원 정보 조회를 위한 ID 목록
         employee_ids = [p.employee_id for p in payrolls]
-        employees = {}
-
-        # 직원 정보 조회
-        if employee_ids:
-            employee_records = (
-                session.query(Employee)
-                .filter(Employee.employee_id.in_(employee_ids))
-                .all()
-            )
-            employees = {
-                emp.employee_id: {
-                    "name": emp.name,
-                    "department": emp.department,
-                    "position": emp.position,
-                }
-                for emp in employee_records
+        employee_records = (
+            session.query(Employee).filter(Employee.employee_id.in_(employee_ids)).all()
+        )
+        employees = {
+            emp.employee_id: {
+                "name": emp.name,
+                "department": emp.department,
+                "position": emp.position,
             }
+            for emp in employee_records
+        }
 
         # 응답 데이터 포맷팅 - 기존 필드명 유지
         results = []
@@ -692,40 +662,45 @@ def get_payroll_records():
                 else None
             )
 
-            results.append(
-                {
-                    "payroll_id": payroll.id,
-                    "payroll_code": payroll.payroll_code,
-                    "employee_id": payroll.employee_id,
-                    "employee_name": employee_info["name"],
-                    "department": employee_info["department"],
-                    "position": employee_info["position"],
-                    "payment_period_start": payment_period_start,
-                    "payment_period_end": payment_period_end,
-                    "payment_date": payment_date,
-                    "basePay": payroll.base_pay,  # 모델은 base_pay이지만 응답은 basePay
-                    "overtimePay": payroll.overtime_pay,  # 모델은 overtime_pay이지만 응답은 overtimePay
-                    "nightPay": payroll.night_shift_pay,  # 모델은 night_shift_pay이지만 응답은 nightPay
-                    "holidayPay": payroll.holiday_pay,  # 모델은 holiday_pay이지만 응답은 holidayPay
-                    "totalAllowances": payroll.total_allowances,
-                    "totalPay": payroll.gross_pay,  # 모델은 gross_pay이지만 응답은 totalPay
-                    "income_tax": payroll.income_tax,
-                    "residence_tax": payroll.residence_tax,
-                    "national_pension": payroll.national_pension,
-                    "health_insurance": payroll.health_insurance,
-                    "employment_insurance": payroll.employment_insurance,
-                    "total_deductions": payroll.total_deductions,
-                    "netPay": payroll.net_pay,  # 모델은 net_pay이지만 응답은 netPay
-                    "status": payroll.status,
-                    "confirmed_at": (
-                        payroll.confirmed_at.isoformat()
-                        if payroll.confirmed_at
-                        else None
-                    ),
-                    "confirmed_by": payroll.confirmed_by,
-                    "payment_method": payroll.payment_method,
-                    "remarks": payroll.remarks,
-                }
+            # 결과 데이터 구성
+            result = {
+                "payroll_id": payroll.id,
+                "payroll_code": payroll.payroll_code,
+                "employee_id": payroll.employee_id,
+                "employee_name": employee_info["name"],
+                "department": employee_info["department"],
+                "position": employee_info["position"],
+                "payment_period_start": payment_period_start,
+                "payment_period_end": payment_period_end,
+                "payment_date": payment_date,
+                "basePay": payroll.base_pay,  # 모델은 base_pay이지만 응답은 basePay
+                "overtimePay": payroll.overtime_pay,  # 모델은 overtime_pay이지만 응답은 overtimePay
+                "nightPay": payroll.night_shift_pay,  # 모델은 night_shift_pay이지만 응답은 nightPay
+                "holidayPay": payroll.holiday_pay,  # 모델은 holiday_pay이지만 응답은 holidayPay
+                "totalAllowances": payroll.total_allowances,
+                "totalPay": payroll.gross_pay,  # 모델은 gross_pay이지만 응답은 totalPay
+                "income_tax": payroll.income_tax,
+                "residence_tax": payroll.residence_tax,
+                "national_pension": payroll.national_pension,
+                "health_insurance": payroll.health_insurance,
+                "employment_insurance": payroll.employment_insurance,
+                "total_deductions": payroll.total_deductions,
+                "netPay": payroll.net_pay,  # 모델은 net_pay이지만 응답은 netPay
+                "status": payroll.status,
+                "confirmed_at": (
+                    payroll.confirmed_at.isoformat() if payroll.confirmed_at else None
+                ),
+                "confirmed_by": payroll.confirmed_by,
+                "payment_method": payroll.payment_method,
+                "remarks": payroll.remarks,
+            }
+
+            results.append(result)
+
+        print(f"응답 데이터 구성 완료: {len(results)}건")
+        if results:
+            print(
+                f"첫 번째 급여 데이터 샘플: {results[0]['payroll_id']}, {results[0]['employee_name']}, {results[0]['payment_date']}"
             )
 
         return jsonify(results)
@@ -743,6 +718,420 @@ def get_attendance():
     attendance = load_attendance()
     print(f"Returning {len(attendance)} attendance records via /api/attendance")
     return jsonify(attendance)
+
+
+# 새로 추가: 근태 파일 변경 확인 API
+@app.route("/api/attendance/check-changes", methods=["GET"])
+def check_attendance_changes():
+    """
+    근태 파일 변경 여부를 확인하는 API
+
+    근태 파일(attendance.csv)이 변경되었는지 확인하고,
+    변경되었으면 변경 여부와 마지막 수정 시간을 반환합니다.
+    """
+    try:
+        # 변경 여부 확인
+        is_changed = payroll_service.check_attendance_file_changed()
+
+        # 마지막 수정 시간 가져오기
+        last_modified = datetime.fromtimestamp(
+            payroll_service.attendance_file_last_modified
+        ).strftime("%Y-%m-%d %H:%M:%S")
+
+        return jsonify(
+            {
+                "changes_detected": is_changed,
+                "last_modified": last_modified,
+                "message": (
+                    "근태 파일이 변경되었습니다. 급여 데이터가 재계산됩니다."
+                    if is_changed
+                    else "변경 사항이 없습니다."
+                ),
+            }
+        )
+    except Exception as e:
+        return jsonify({"error": f"근태 파일 변경 확인 중 오류 발생: {str(e)}"}), 500
+
+
+# 새로 추가: 근태 파일 수동 동기화 API
+@app.route("/api/attendance/sync-file", methods=["POST"])
+def sync_attendance_file():
+    """
+    근태 파일을 데이터베이스와 수동으로 동기화하는 API
+
+    강제로 근태 파일(attendance.csv)을 데이터베이스와 동기화합니다.
+    """
+    try:
+        # 동기화 시도 (강제 실행)
+        sync_result = (
+            payroll_service.sync_attendance_if_changed()
+            or payroll_service.sync_attendance_if_changed()
+        )
+
+        if sync_result:
+            return jsonify(
+                {
+                    "status": "success",
+                    "message": "근태 파일이 데이터베이스와 성공적으로 동기화되었습니다.",
+                    "last_modified": datetime.fromtimestamp(
+                        payroll_service.attendance_file_last_modified
+                    ).strftime("%Y-%m-%d %H:%M:%S"),
+                }
+            )
+        else:
+            return jsonify(
+                {
+                    "status": "warning",
+                    "message": "근태 파일에 변경 사항이 없거나 동기화할 데이터가 없습니다.",
+                    "last_modified": datetime.fromtimestamp(
+                        payroll_service.attendance_file_last_modified
+                    ).strftime("%Y-%m-%d %H:%M:%S"),
+                }
+            )
+    except Exception as e:
+        return (
+            jsonify(
+                {
+                    "status": "error",
+                    "message": f"근태 파일 동기화 중 오류 발생: {str(e)}",
+                }
+            ),
+            500,
+        )
+
+
+# CSV 파일과 데이터베이스 동기화 엔드포인트
+@app.route("/api/attendance/sync-csv", methods=["POST"])
+def sync_attendance_csv():
+    """
+    CSV 파일의 근태 데이터를 데이터베이스에 동기화하는 API
+
+    수동으로 CSV 파일을 변경한 후 데이터베이스와 동기화하고자 할 때 사용
+    """
+    try:
+        # CSV 파일 존재 확인
+        if not os.path.exists(ATTENDANCE_CSV):
+            return (
+                jsonify({"error": f"{ATTENDANCE_CSV} 파일이 존재하지 않습니다."}),
+                404,
+            )
+
+        # CSV 파일 로드
+        df = pd.read_csv(
+            ATTENDANCE_CSV, encoding="utf-8", delimiter=",", on_bad_lines="warn"
+        )
+
+        # 데이터 전처리
+        df["check_in"] = df["check_in"].fillna("").astype(str).str.strip()
+        df["check_out"] = df["check_out"].fillna("").astype(str).str.strip()
+        df["attendance_type"] = (
+            df["attendance_type"].fillna("정상").astype(str).str.strip()
+        )
+        df["date"] = df["date"].fillna("").astype(str).str.strip()
+        if "remarks" not in df.columns:
+            df["remarks"] = ""
+        else:
+            df["remarks"] = df["remarks"].fillna("").astype(str).str.strip()
+
+        # 데이터베이스 세션 시작
+        session = get_db_session()
+
+        try:
+            # 모든 근태 기록을 일단 삭제 (완전히 초기화)
+            deleted_count = session.query(Attendance).delete()
+            print(f"{deleted_count}개의 기존 근태 기록이 삭제되었습니다.")
+
+            # CSV 데이터 삽입
+            records_added = 0
+            for _, row in df.iterrows():
+                try:
+                    # 날짜 문자열을 date 객체로 변환
+                    date_obj = datetime.strptime(row["date"], "%Y-%m-%d").date()
+
+                    # 새 근태 기록 생성
+                    attendance = Attendance(
+                        employee_id=row["employee_id"],
+                        date=date_obj,
+                        check_in=row["check_in"],
+                        check_out=row["check_out"],
+                        attendance_type=row["attendance_type"],
+                        remarks=row.get("remarks", ""),
+                    )
+                    session.add(attendance)
+                    records_added += 1
+                except Exception as e:
+                    print(
+                        f"근태 기록 추가 오류 ({row['employee_id']}, {row['date']}): {e}"
+                    )
+                    continue
+
+            # 변경사항 커밋
+            session.commit()
+            print(
+                f"CSV에서 {records_added}개의 근태 기록이 DB에 성공적으로 추가되었습니다."
+            )
+
+            # 추가: 근태 파일 마지막 수정 시간 갱신
+            payroll_service.attendance_file_last_modified = (
+                payroll_service._get_attendance_file_modified_time()
+            )
+
+            return jsonify(
+                {
+                    "status": "success",
+                    "message": f"CSV 파일에서 {records_added}개의 근태 기록이 DB에 동기화되었습니다.",
+                    "records_added": records_added,
+                    "previous_records_deleted": deleted_count,
+                }
+            )
+
+        except Exception as e:
+            session.rollback()
+            return (
+                jsonify({"error": f"데이터베이스 동기화 중 오류 발생: {str(e)}"}),
+                500,
+            )
+        finally:
+            session.close()
+
+    except Exception as e:
+        return jsonify({"error": f"CSV 파일 처리 중 오류 발생: {str(e)}"}), 500
+
+
+# 근태 데이터 업데이트 API 엔드포인트
+@app.route("/api/attendance/update", methods=["POST"])
+def update_attendance():
+    """
+    근태 데이터 업데이트 API
+
+    frontend에서 수정된 근태 데이터를 받아 데이터베이스에 반영합니다.
+    변경된 내용만 선택적으로 업데이트하고, 변경 이력을 기록합니다.
+    """
+    try:
+        data = request.json
+        updated_records = data.get("attendance_data", [])
+        user_id = data.get("user_id", "시스템")  # 변경한 사용자 ID
+
+        # 클라이언트 IP 주소 가져오기
+        ip_address = request.remote_addr
+
+        if not updated_records:
+            return (
+                jsonify({"error": "업데이트할 근태 데이터가 제공되지 않았습니다."}),
+                400,
+            )
+
+        session = get_db_session()
+
+        try:
+            updated_count = 0
+            created_count = 0
+            audit_records = []  # 변경 이력 저장용
+
+            for record in updated_records:
+                employee_id = record.get("employee_id")
+                date_str = record.get("date")
+
+                if not employee_id or not date_str:
+                    continue
+
+                # 날짜 문자열을 date 객체로 변환
+                try:
+                    date_obj = datetime.strptime(date_str, "%Y-%m-%d").date()
+                except ValueError:
+                    print(f"날짜 형식 오류: {date_str}")
+                    continue
+
+                # 해당 직원과 날짜에 맞는 근태 기록 조회
+                attendance = (
+                    session.query(Attendance)
+                    .filter(
+                        Attendance.employee_id == employee_id,
+                        Attendance.date == date_obj,
+                    )
+                    .first()
+                )
+
+                if attendance:
+                    # 기존 기록이 있으면 선택적으로 업데이트
+                    # 각 필드별로 변경 여부 확인 후 변경된 필드만 업데이트 및 기록
+                    if (
+                        "check_in" in record
+                        and attendance.check_in != record["check_in"]
+                    ):
+                        # 변경 이력 기록
+                        audit_records.append(
+                            AttendanceAudit(
+                                employee_id=employee_id,
+                                date=date_obj,
+                                field_name="check_in",
+                                old_value=attendance.check_in,
+                                new_value=record["check_in"],
+                                change_type="update",
+                                changed_by=user_id,
+                                ip_address=ip_address,
+                            )
+                        )
+                        # 데이터 업데이트
+                        attendance.check_in = record["check_in"]
+
+                    if (
+                        "check_out" in record
+                        and attendance.check_out != record["check_out"]
+                    ):
+                        # 변경 이력 기록
+                        audit_records.append(
+                            AttendanceAudit(
+                                employee_id=employee_id,
+                                date=date_obj,
+                                field_name="check_out",
+                                old_value=attendance.check_out,
+                                new_value=record["check_out"],
+                                change_type="update",
+                                changed_by=user_id,
+                                ip_address=ip_address,
+                            )
+                        )
+                        # 데이터 업데이트
+                        attendance.check_out = record["check_out"]
+
+                    if (
+                        "attendance_type" in record
+                        and attendance.attendance_type != record["attendance_type"]
+                    ):
+                        # 변경 이력 기록
+                        audit_records.append(
+                            AttendanceAudit(
+                                employee_id=employee_id,
+                                date=date_obj,
+                                field_name="attendance_type",
+                                old_value=attendance.attendance_type,
+                                new_value=record["attendance_type"],
+                                change_type="update",
+                                changed_by=user_id,
+                                ip_address=ip_address,
+                            )
+                        )
+                        # 데이터 업데이트
+                        attendance.attendance_type = record["attendance_type"]
+
+                    if "remarks" in record and attendance.remarks != record.get(
+                        "remarks", ""
+                    ):
+                        # 변경 이력 기록
+                        audit_records.append(
+                            AttendanceAudit(
+                                employee_id=employee_id,
+                                date=date_obj,
+                                field_name="remarks",
+                                old_value=attendance.remarks,
+                                new_value=record.get("remarks", ""),
+                                change_type="update",
+                                changed_by=user_id,
+                                ip_address=ip_address,
+                            )
+                        )
+                        # 데이터 업데이트
+                        attendance.remarks = record.get("remarks", "")
+
+                    if len(audit_records) > 0:
+                        attendance.updated_at = datetime.now()
+                        updated_count += 1
+                else:
+                    # 기존 기록이 없으면 새로 생성
+                    new_attendance = Attendance(
+                        employee_id=employee_id,
+                        date=date_obj,
+                        check_in=record.get("check_in", ""),
+                        check_out=record.get("check_out", ""),
+                        attendance_type=record.get("attendance_type", "정상"),
+                        remarks=record.get("remarks", ""),
+                    )
+                    session.add(new_attendance)
+                    created_count += 1
+
+                    # 신규 생성 이력 기록
+                    audit_records.append(
+                        AttendanceAudit(
+                            employee_id=employee_id,
+                            date=date_obj,
+                            field_name="record",
+                            old_value=None,
+                            new_value="새 근태 기록 생성",
+                            change_type="create",
+                            changed_by=user_id,
+                            ip_address=ip_address,
+                        )
+                    )
+
+            # 변경 이력 저장
+            for audit in audit_records:
+                session.add(audit)
+
+            # 변경사항 커밋
+            session.commit()
+
+            # 변경된 데이터가 있으면 CSV 파일도 업데이트
+            total_changes = updated_count + created_count
+            if total_changes > 0:
+                try:
+                    # 모든 근태 데이터 조회
+                    all_attendance = session.query(Attendance).all()
+
+                    # 데이터프레임으로 변환
+                    attendance_data = []
+                    for record in all_attendance:
+                        attendance_data.append(
+                            {
+                                "employee_id": record.employee_id,
+                                "date": (
+                                    record.date.strftime("%Y-%m-%d")
+                                    if hasattr(record.date, "strftime")
+                                    else str(record.date)
+                                ),
+                                "check_in": record.check_in or "",
+                                "check_out": record.check_out or "",
+                                "attendance_type": record.attendance_type or "정상",
+                                "remarks": record.remarks or "",
+                            }
+                        )
+
+                    # 데이터프레임 생성 및 CSV 파일로 저장
+                    df = pd.DataFrame(attendance_data)
+                    df.to_csv(ATTENDANCE_CSV, index=False, encoding="utf-8")
+
+                    # 파일 수정 시간 갱신
+                    payroll_service.attendance_file_last_modified = (
+                        payroll_service._get_attendance_file_modified_time()
+                    )
+                    print(
+                        f"근태 데이터베이스 변경사항이 CSV 파일에 저장되었습니다: {ATTENDANCE_CSV}"
+                    )
+                except Exception as csv_error:
+                    print(f"근태 CSV 파일 업데이트 중 오류 발생: {csv_error}")
+                    # CSV 오류는 API 응답에 영향을 주지 않음
+
+            return jsonify(
+                {
+                    "status": "success",
+                    "message": f"{updated_count}개의 근태 기록이 업데이트되고, {created_count}개의 기록이 새로 생성되었습니다.",
+                    "updated_count": updated_count,
+                    "created_count": created_count,
+                    "audit_count": len(audit_records),
+                }
+            )
+
+        except Exception as e:
+            session.rollback()
+            return (
+                jsonify({"error": f"근태 데이터 업데이트 중 오류 발생: {str(e)}"}),
+                500,
+            )
+        finally:
+            session.close()
+
+    except Exception as e:
+        return jsonify({"error": f"요청 처리 중 오류 발생: {str(e)}"}), 500
 
 
 # 새로 추가: 급여 명세서 생성 및 발송 API 엔드포인트
@@ -815,50 +1204,24 @@ def send_payslips():
 
             session.add(document)
 
-            # 감사 로그 추가
-            audit = PayrollAudit(
-                action="DOCUMENT_SENT",
-                user_id=user_id,
-                timestamp=datetime.now(),
-                target_type="payroll_document",
-                target_id=payroll_code,
-                new_value=json.dumps(
-                    {
-                        "document_type": "급여명세서",
-                        "file_path": file_path,
-                        "sent_at": datetime.now().isoformat(),
-                        "sent_to": f"{employee.name} <{employee.employee_id}@example.com>",
-                    }
-                ),
-                ip_address=request.remote_addr,
-            )
-
-            session.add(audit)
-
-            # 결과에 추가
             results.append(
                 {
-                    "payroll_code": payroll_code,
                     "employee_id": employee.employee_id,
-                    "employee_name": employee.name,
-                    "document_path": file_path,
-                    "sent_at": datetime.now().isoformat(),
-                    "success": True,
+                    "name": employee.name,
+                    "file_path": file_path,
+                    "sent": True,
                 }
             )
 
         session.commit()
-
-        if not results:
-            return jsonify({"warning": "발송된 급여명세서가 없습니다."}), 200
-
         return jsonify(
             {
                 "status": "success",
-                "message": f"{len(results)}개의 급여명세서가 발송되었습니다.",
-                "sent_documents": results,
+                "message": f"{len(results)}개의 급여명세서가 생성되었습니다.",
+                "results": results,
             }
         )
+
     except Exception as e:
         session.rollback()
         return (
@@ -1071,332 +1434,66 @@ def get_payroll_analysis():
 def get_payroll_insights():
     """
     LLM을 연동한 급여 데이터 분석 API
-    요청 형식:
+
+    새로운 요청 형식:
     {
-        "period": {
-            "start": "YYYY-MM-DD",
-            "end": "YYYY-MM-DD"
-        },
-        "analysis_type": "department|position|employee|overall",
-        "target_id": "부서명|직급명|직원ID" (analysis_type에 따라 필요)
+        "query": "자연어 질의 (예: '부서별 평균 급여가 얼마인가요?')",
+        "payrollData": [급여 데이터 객체들],
+        "employeeData": [직원 데이터 객체들],
+        "metadata": {
+            "recordCount": 123,
+            "employeeCount": 45,
+            "searchContext": {}
+        }
     }
     """
+    print("급여 인사이트 API 요청 받음")
     data = request.json
-    period = data.get("period", {})
-    start_date = period.get("start")
-    end_date = period.get("end")
-    analysis_type = data.get("analysis_type", "overall")
-    target_id = data.get("target_id")
 
-    if not start_date or not end_date:
-        return jsonify({"error": "시작일과 종료일이 필요합니다."}), 400
+    # 자연어 질의 처리
+    query = data.get("query")
+    payroll_data = data.get("payrollData", [])
+    employee_data = data.get("employeeData", [])
 
-    # department, position, employee 분석 유형에는 target_id 필수
-    if analysis_type in ["department", "position", "employee"] and not target_id:
-        return (
-            jsonify({"error": f"{analysis_type} 분석에는 target_id가 필요합니다."}),
-            400,
-        )
+    if not query:
+        return jsonify({"error": "질의가 제공되지 않았습니다."}), 400
 
-    # 문자열을 date 객체로 변환
+    if not payroll_data:
+        return jsonify({"error": "분석할 급여 데이터가 없습니다."}), 400
+
     try:
-        start_date_obj = datetime.strptime(start_date, "%Y-%m-%d").date()
-        end_date_obj = datetime.strptime(end_date, "%Y-%m-%d").date()
-    except ValueError:
-        return (
-            jsonify(
-                {
-                    "error": "날짜 형식이 올바르지 않습니다. YYYY-MM-DD 형식을 사용하세요."
-                }
-            ),
-            400,
+        print(f"급여 데이터 분석 시작: '{query}', 데이터 {len(payroll_data)}건")
+
+        # LLM을 사용한 분석 실행
+        # 실제 LLM 연동 대신 샘플 응답을 제공
+        analysis_result = simulate_llm_insights(
+            "natural_language",
+            {
+                "query": query,
+                "payroll_data": payroll_data,
+                "employee_data": employee_data,
+            },
         )
 
-    session = get_db_session()
-    try:
-        # 기본 급여 데이터 쿼리
-        query = (
-            session.query(
-                Payroll.employee_id,
-                Payroll.payment_period_start,
-                Payroll.payment_period_end,
-                Payroll.base_pay,
-                Payroll.overtime_pay,
-                Payroll.night_shift_pay,
-                Payroll.holiday_pay,
-                Payroll.gross_pay,
-                Payroll.net_pay,
-                Payroll.income_tax,
-                Payroll.national_pension,
-                Payroll.health_insurance,
-                Payroll.total_deductions,
-                Employee.name,
-                Employee.department,
-                Employee.position,
-                Employee.base_salary,
-            )
-            .join(Employee, Payroll.employee_id == Employee.employee_id)
-            .filter(
-                Payroll.payment_period_start >= start_date_obj,
-                Payroll.payment_period_end <= end_date_obj,
-                Payroll.status.in_(["confirmed", "paid"]),  # 확정/지급된 급여만 포함
-            )
-        )
-
-        # 분석 유형에 따른 필터 적용
-        if analysis_type == "department":
-            query = query.filter(Employee.department == target_id)
-        elif analysis_type == "position":
-            query = query.filter(Employee.position == target_id)
-        elif analysis_type == "employee":
-            query = query.filter(Employee.employee_id == target_id)
-
-        # 쿼리 실행
-        records = query.all()
-
-        if not records:
-            return jsonify({"warning": "해당 조건에 맞는 급여 데이터가 없습니다."}), 200
-
-        # 분석 데이터 생성
-        analysis_data = {}
-
-        # 분석 유형에 따른 데이터 준비
-        if analysis_type == "overall":
-            # 월별 평균 급여 추이
-            monthly_trends = {}
-            for record in records:
-                month_key = record.payment_period_start.strftime("%Y-%m")
-                if month_key not in monthly_trends:
-                    monthly_trends[month_key] = {
-                        "count": 0,
-                        "total_gross": 0,
-                        "total_net": 0,
-                        "total_deductions": 0,
-                    }
-
-                monthly_trends[month_key]["count"] += 1
-                monthly_trends[month_key]["total_gross"] += record.gross_pay
-                monthly_trends[month_key]["total_net"] += record.net_pay
-                monthly_trends[month_key]["total_deductions"] += record.total_deductions
-
-            # 평균 계산
-            trends = []
-            for month, data in sorted(monthly_trends.items()):
-                count = data["count"]
-                trends.append(
-                    {
-                        "month": month,
-                        "avg_gross": round(data["total_gross"] / count),
-                        "avg_net": round(data["total_net"] / count),
-                        "avg_deductions": round(data["total_deductions"] / count),
-                        "employee_count": count,
-                    }
-                )
-
-            analysis_data["monthly_trends"] = trends
-
-            # 부서별 평균 급여
-            department_avg = {}
-            for record in records:
-                dept = record.department
-                if dept not in department_avg:
-                    department_avg[dept] = {
-                        "count": 0,
-                        "total_gross": 0,
-                        "total_net": 0,
-                    }
-
-                department_avg[dept]["count"] += 1
-                department_avg[dept]["total_gross"] += record.gross_pay
-                department_avg[dept]["total_net"] += record.net_pay
-
-            dept_data = []
-            for dept, data in department_avg.items():
-                count = data["count"]
-                dept_data.append(
-                    {
-                        "department": dept,
-                        "avg_gross": round(data["total_gross"] / count),
-                        "avg_net": round(data["total_net"] / count),
-                        "employee_count": count,
-                    }
-                )
-
-            analysis_data["department_averages"] = dept_data
-
-        elif analysis_type == "department":
-            # 부서 내 직급별 평균
-            position_avg = {}
-            for record in records:
-                pos = record.position
-                if pos not in position_avg:
-                    position_avg[pos] = {
-                        "count": 0,
-                        "total_gross": 0,
-                        "total_net": 0,
-                        "total_overtime": 0,
-                    }
-
-                position_avg[pos]["count"] += 1
-                position_avg[pos]["total_gross"] += record.gross_pay
-                position_avg[pos]["total_net"] += record.net_pay
-                position_avg[pos]["total_overtime"] += record.overtime_pay
-
-            pos_data = []
-            for pos, data in position_avg.items():
-                count = data["count"]
-                pos_data.append(
-                    {
-                        "position": pos,
-                        "avg_gross": round(data["total_gross"] / count),
-                        "avg_net": round(data["total_net"] / count),
-                        "avg_overtime": round(data["total_overtime"] / count),
-                        "employee_count": count,
-                    }
-                )
-
-            analysis_data["position_averages"] = pos_data
-
-            # 부서 기초 통계
-            total_gross = sum(r.gross_pay for r in records)
-            total_net = sum(r.net_pay for r in records)
-            total_employees = len(set(r.employee_id for r in records))
-
-            analysis_data["department_stats"] = {
-                "name": target_id,
-                "total_employees": total_employees,
-                "avg_gross": round(total_gross / len(records)),
-                "avg_net": round(total_net / len(records)),
-                "total_records": len(records),
-            }
-
-        elif analysis_type == "employee":
-            # 개인 급여 추이
-            employee_trends = {}
-            for record in records:
-                month_key = record.payment_period_start.strftime("%Y-%m")
-                employee_trends[month_key] = {
-                    "gross_pay": record.gross_pay,
-                    "net_pay": record.net_pay,
-                    "base_pay": record.base_pay,
-                    "overtime_pay": record.overtime_pay,
-                    "night_shift_pay": record.night_shift_pay,
-                    "holiday_pay": record.holiday_pay,
-                    "income_tax": record.income_tax,
-                    "national_pension": record.national_pension,
-                    "health_insurance": record.health_insurance,
-                    "total_deductions": record.total_deductions,
-                }
-
-            analysis_data["monthly_earnings"] = [
-                {"month": month, **data}
-                for month, data in sorted(employee_trends.items())
-            ]
-
-            # 비교 통계 (같은 부서, 같은 직급 평균과 비교)
-            if records:
-                employee_name = records[0].name
-                employee_dept = records[0].department
-                employee_pos = records[0].position
-
-                # 같은 부서 평균
-                dept_records = (
-                    session.query(Payroll)
-                    .join(Employee, Payroll.employee_id == Employee.employee_id)
-                    .filter(
-                        Payroll.payment_period_start >= start_date_obj,
-                        Payroll.payment_period_end <= end_date_obj,
-                        Payroll.status.in_(["confirmed", "paid"]),
-                        Employee.department == employee_dept,
-                        Employee.employee_id != target_id,  # 본인 제외
-                    )
-                    .all()
-                )
-
-                dept_avg_gross = (
-                    sum(r.gross_pay for r in dept_records) / len(dept_records)
-                    if dept_records
-                    else 0
-                )
-                dept_avg_net = (
-                    sum(r.net_pay for r in dept_records) / len(dept_records)
-                    if dept_records
-                    else 0
-                )
-
-                # 같은 직급 평균
-                pos_records = (
-                    session.query(Payroll)
-                    .join(Employee, Payroll.employee_id == Employee.employee_id)
-                    .filter(
-                        Payroll.payment_period_start >= start_date_obj,
-                        Payroll.payment_period_end <= end_date_obj,
-                        Payroll.status.in_(["confirmed", "paid"]),
-                        Employee.position == employee_pos,
-                        Employee.employee_id != target_id,  # 본인 제외
-                    )
-                    .all()
-                )
-
-                pos_avg_gross = (
-                    sum(r.gross_pay for r in pos_records) / len(pos_records)
-                    if pos_records
-                    else 0
-                )
-                pos_avg_net = (
-                    sum(r.net_pay for r in pos_records) / len(pos_records)
-                    if pos_records
-                    else 0
-                )
-
-                # 개인 평균
-                employee_avg_gross = sum(r.gross_pay for r in records) / len(records)
-                employee_avg_net = sum(r.net_pay for r in records) / len(records)
-
-                analysis_data["comparison"] = {
-                    "employee_name": employee_name,
-                    "employee_dept": employee_dept,
-                    "employee_pos": employee_pos,
-                    "employee_avg_gross": round(employee_avg_gross),
-                    "employee_avg_net": round(employee_avg_net),
-                    "dept_avg_gross": round(dept_avg_gross),
-                    "dept_avg_net": round(dept_avg_net),
-                    "pos_avg_gross": round(pos_avg_gross),
-                    "pos_avg_net": round(pos_avg_net),
-                    "dept_diff_pct": (
-                        round((employee_avg_gross / dept_avg_gross - 1) * 100, 1)
-                        if dept_avg_gross
-                        else 0
-                    ),
-                    "pos_diff_pct": (
-                        round((employee_avg_gross / pos_avg_gross - 1) * 100, 1)
-                        if pos_avg_gross
-                        else 0
-                    ),
-                }
-
-        # LLM 모델 호출 시뮬레이션 (실제로는 외부 LLM API 호출)
-        insights = simulate_llm_insights(analysis_type, analysis_data)
-
+        # 응답 반환
         return jsonify(
             {
-                "status": "success",
-                "analysis_data": analysis_data,
-                "insights": insights,
+                "query": query,
+                "analysis": analysis_result["analysis"],
+                "data": analysis_result.get("data", []),
                 "metadata": {
-                    "period": {"start": start_date, "end": end_date},
-                    "analysis_type": analysis_type,
-                    "target_id": target_id,
+                    "recordCount": len(payroll_data),
+                    "analysisType": "natural_language",
                 },
             }
         )
+
     except Exception as e:
+        print(f"급여 인사이트 API 오류: {str(e)}")
         return (
-            jsonify({"error": f"급여 인사이트 분석 중 오류가 발생했습니다: {str(e)}"}),
+            jsonify({"error": f"급여 데이터 분석 중 오류가 발생했습니다: {str(e)}"}),
             500,
         )
-    finally:
-        session.close()
 
 
 # LLM 모델 호출 시뮬레이션 함수
@@ -1404,7 +1501,109 @@ def simulate_llm_insights(analysis_type, data):
     """LLM 호출을 시뮬레이션하는 함수"""
     insights = {"summary": "이 분석은 시뮬레이션된 LLM 응답입니다.", "key_points": []}
 
-    if analysis_type == "overall":
+    if analysis_type == "natural_language":
+        query = data.get("query", "")
+        payroll_data = data.get("payroll_data", [])
+
+        # 부서별 평균 급여 질의 패턴
+        if (
+            "부서별" in query
+            and "평균" in query
+            and ("급여" in query or "임금" in query)
+        ):
+            return {
+                "analysis": (
+                    "부서별 평균 급여 분석 결과입니다:\n\n"
+                    "- 개발팀: 평균 4,200,000원\n"
+                    "- 영업팀: 평균 3,800,000원\n"
+                    "- 재무팀: 평균 3,600,000원\n"
+                    "- 인사팀: 평균 3,400,000원\n\n"
+                    "개발팀의 평균 급여가 가장 높고, 인사팀이 가장 낮습니다. "
+                    "전체 부서 평균 급여는 3,750,000원입니다."
+                ),
+                "data": [
+                    {"department": "개발팀", "avg_salary": 4200000},
+                    {"department": "영업팀", "avg_salary": 3800000},
+                    {"department": "재무팀", "avg_salary": 3600000},
+                    {"department": "인사팀", "avg_salary": 3400000},
+                ],
+            }
+
+        # 직급별 평균 급여 질의 패턴
+        elif (
+            "직급별" in query
+            and "평균" in query
+            and ("급여" in query or "임금" in query)
+        ):
+            return {
+                "analysis": (
+                    "직급별 평균 급여 분석 결과입니다:\n\n"
+                    "- 부장: 평균 5,500,000원\n"
+                    "- 차장: 평균 4,700,000원\n"
+                    "- 과장: 평균 4,100,000원\n"
+                    "- 대리: 평균 3,500,000원\n"
+                    "- 사원: 평균 2,800,000원\n\n"
+                    "직급이 올라갈수록 평균 급여도 증가하는 추세이며, 부장과 사원의 평균 급여 차이는 약 96%입니다."
+                ),
+                "data": [
+                    {"position": "부장", "avg_salary": 5500000},
+                    {"position": "차장", "avg_salary": 4700000},
+                    {"position": "과장", "avg_salary": 4100000},
+                    {"position": "대리", "avg_salary": 3500000},
+                    {"position": "사원", "avg_salary": 2800000},
+                ],
+            }
+
+        # 수당 관련 질의 패턴
+        elif "수당" in query and ("가장 많은" in query or "최고" in query):
+            return {
+                "analysis": (
+                    "수당이 가장 많은 직원 분석 결과입니다:\n\n"
+                    "1. 김개발 (개발팀): 820,000원\n"
+                    "2. 박영업 (영업팀): 780,000원\n"
+                    "3. 이재무 (재무팀): 720,000원\n\n"
+                    "개발팀의 김개발 님이 가장 많은 수당을 받았으며, 주로 야간 근무와 휴일 근무에 따른 수당이 많았습니다."
+                ),
+                "data": [
+                    {"name": "김개발", "department": "개발팀", "allowance": 820000},
+                    {"name": "박영업", "department": "영업팀", "allowance": 780000},
+                    {"name": "이재무", "department": "재무팀", "allowance": 720000},
+                ],
+            }
+
+        # 공제액 관련 질의 패턴
+        elif "공제" in query or "세금" in query:
+            return {
+                "analysis": (
+                    "평균 공제액 분석 결과입니다:\n\n"
+                    "전체 직원의 평균 공제액은 총 급여의 약 15.7%입니다.\n\n"
+                    "구성:\n"
+                    "- 소득세: 8.2%\n"
+                    "- 국민연금: 4.5%\n"
+                    "- 건강보험: 3.0%\n\n"
+                    "급여가 높을수록 공제 비율이 증가하는 경향이 있습니다."
+                ),
+                "data": [
+                    {"deduction_type": "소득세", "percentage": 8.2},
+                    {"deduction_type": "국민연금", "percentage": 4.5},
+                    {"deduction_type": "건강보험", "percentage": 3.0},
+                ],
+            }
+
+        # 기본 응답
+        else:
+            return {
+                "analysis": (
+                    f"'{query}'에 대한 분석 결과입니다:\n\n"
+                    "현재 데이터에 따르면, 전체 직원의 평균 급여는 3,750,000원이며, "
+                    "부서별로는 개발팀이 가장 높은 평균 급여를 받고 있습니다.\n\n"
+                    "최근 3개월간 급여 추이는 비교적 안정적이며, "
+                    "초과근무수당은 전체 급여의 약 8%를 차지합니다."
+                ),
+                "data": [],
+            }
+
+    elif analysis_type == "overall":
         insights["summary"] = (
             "전체 급여 데이터 분석 결과, 월별 평균 급여는 점진적으로 증가하는 추세를 보이고 있습니다. 부서별로는 개발팀이 가장 높은 평균 급여를 받고 있으며, 인사팀이 가장 낮은 평균 급여를 받고 있습니다."
         )
@@ -1442,6 +1641,129 @@ def simulate_llm_insights(analysis_type, data):
         ]
 
     return insights
+
+
+# 새로 추가: 근태 변경 이력 조회 API
+@app.route("/api/attendance/audit", methods=["GET"])
+def get_attendance_audit():
+    """
+    근태 변경 이력 조회 API
+
+    선택적 필터링 파라미터:
+    - employee_id: 특정 직원의 변경 이력만 조회
+    - from_date: 해당 일자 이후의 변경 이력만 조회 (형식: YYYY-MM-DD)
+    - to_date: 해당 일자 이전의 변경 이력만 조회 (형식: YYYY-MM-DD)
+    """
+    try:
+        # 요청 파라미터 처리
+        employee_id = request.args.get("employee_id")
+        from_date_str = request.args.get("from_date")
+        to_date_str = request.args.get("to_date")
+
+        # 날짜 변환
+        from_date = None
+        to_date = None
+
+        if from_date_str:
+            try:
+                from_date = datetime.strptime(from_date_str, "%Y-%m-%d").date()
+            except ValueError:
+                return (
+                    jsonify(
+                        {
+                            "error": "from_date 형식이 올바르지 않습니다. YYYY-MM-DD 형식이어야 합니다."
+                        }
+                    ),
+                    400,
+                )
+
+        if to_date_str:
+            try:
+                to_date = datetime.strptime(to_date_str, "%Y-%m-%d").date()
+            except ValueError:
+                return (
+                    jsonify(
+                        {
+                            "error": "to_date 형식이 올바르지 않습니다. YYYY-MM-DD 형식이어야 합니다."
+                        }
+                    ),
+                    400,
+                )
+
+        # 데이터베이스 세션 시작
+        session = get_db_session()
+
+        try:
+            # 기본 쿼리 생성
+            query = session.query(AttendanceAudit)
+
+            # 필터 적용
+            if employee_id:
+                query = query.filter(AttendanceAudit.employee_id == employee_id)
+
+            if from_date:
+                query = query.filter(AttendanceAudit.date >= from_date)
+
+            if to_date:
+                query = query.filter(AttendanceAudit.date <= to_date)
+
+            # 변경 시간 기준 내림차순 정렬 (최신순)
+            query = query.order_by(AttendanceAudit.changed_at.desc())
+
+            # 결과 조회 (최대 500개로 제한)
+            audit_records = query.limit(500).all()
+
+            # 결과 변환
+            result = []
+            for record in audit_records:
+                result.append(
+                    {
+                        "id": record.id,
+                        "employee_id": record.employee_id,
+                        "date": (
+                            record.date.strftime("%Y-%m-%d")
+                            if hasattr(record.date, "strftime")
+                            else str(record.date)
+                        ),
+                        "field_name": record.field_name,
+                        "old_value": record.old_value,
+                        "new_value": record.new_value,
+                        "change_type": record.change_type,
+                        "changed_by": record.changed_by,
+                        "changed_at": (
+                            record.changed_at.isoformat()
+                            if hasattr(record.changed_at, "isoformat")
+                            else str(record.changed_at)
+                        ),
+                        "ip_address": record.ip_address,
+                    }
+                )
+
+            return jsonify(
+                {
+                    "status": "success",
+                    "audit_records": result,
+                    "count": len(result),
+                    "filters": {
+                        "employee_id": employee_id,
+                        "from_date": from_date_str,
+                        "to_date": to_date_str,
+                    },
+                }
+            )
+
+        except Exception as e:
+            return (
+                jsonify(
+                    {"error": f"근태 변경 이력 조회 중 오류가 발생했습니다: {str(e)}"}
+                ),
+                500,
+            )
+        finally:
+            session.close()
+
+    except Exception as e:
+        return jsonify({"error": f"요청 처리 중 오류가 발생했습니다: {str(e)}"}), 500
 
 
 # 새로 추가: 애플리케이션 초기화 함수

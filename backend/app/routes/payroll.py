@@ -5,7 +5,13 @@ from config import Config
 import datetime
 from sqlalchemy.orm import Session
 from models.models import Employee, Attendance, Payroll
-from backend.utils.pay_calculator import PayCalculator
+import sys
+import os
+
+sys.path.append(
+    os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+)
+from utils.pay_calculator import PayCalculator
 
 # 블루프린트 생성
 payroll_bp = Blueprint("payroll", __name__)

@@ -9,8 +9,8 @@ const GlobalTabs = () => {
   const location = useLocation();
 
   const mainTabs = [
-    { label: '홈', path: '/' },
-    { label: '급여 관리', path: '/payroll' },
+    { label: 'Home', path: '/' },
+    { label: 'Payroll', path: '/payroll' },
   ];
 
   // '/payroll'로 시작하는 경로는 '/payroll'로 설정

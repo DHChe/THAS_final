@@ -35,31 +35,33 @@ import {
   Stack,
   TablePagination,
   CircularProgress,
+  Card,
+  CardHeader,
+  CardContent,
+  MenuItem,
 } from '@mui/material';
 import { LocalizationProvider, DatePicker } from '@mui/x-date-pickers';
 import { AdapterDayjs } from '@mui/x-date-pickers/AdapterDayjs';
 import ExpandMoreIcon from '@mui/icons-material/ExpandMore';
-import GlobalTabs from '../../components/GlobalTabs'; // GlobalNavigation을 GlobalTabs로 변경
+import GlobalTabs from '../../components/GlobalTabs';
 import dayjs from 'dayjs';
-import { summarizeSearchResults, generateInitialAIMessage } from '../../utils/aiService';
+import isSameOrBefore from 'dayjs/plugin/isSameOrBefore';
+import minMax from 'dayjs/plugin/minMax';
 import AIMessageInput from '../../components/chat/AIMessageInput';
 import { debounce } from '../../utils/debounce';
 import SearchInput from '../../components/search/SearchInput';
 import { analyzeData } from '../../services/aiService';
 import { VIEW_MODES, TABLE_COLUMNS, getActiveColumns, SALARY_TABS, BASE_COLUMNS } from '../../utils/tableConstants';
-import { transformPayrollData } from '../../utils/payrollDataTransformer';
-import isSameOrBefore from 'dayjs/plugin/isSameOrBefore';
 import ProcessingProgress from '../../components/progress/ProcessingProgress';
-import { checkLangSmithSetup } from '../../utils/debugLangSmith';
 import { DataChangeDetector } from '../../utils/dataChangeDetector';
 import { message } from 'antd';
-import ContextManager from '../../utils/contextManager';
 import { StyledPaper, StyledButton } from '../../components/StyledComponents';
 import { ThemeProvider } from '@mui/material/styles';
 import theme from '../../styles/theme';
 import commonStyles from '../../styles/styles';
 
 dayjs.extend(isSameOrBefore);
+dayjs.extend(minMax);
 
 const PayrollAnalysis = () => {
   // 데이터 상태
@@ -105,18 +107,46 @@ const PayrollAnalysis = () => {
     '대리': false,
     '과장': false,
     '차장': false,
-    '부장': false
+    '부장': false,
+    '이사': false
   });
-  const [advancedFilters, setAdvancedFilters] = useState({
-    joinDateRange: {
-      start: null,
-      end: null
-    },
-    tenureRange: [0, 10],
-    showAdvanced: false
+  const [minDate, setMinDate] = useState(null);
+  const [maxDate, setMaxDate] = useState(null);
+  const [page, setPage] = useState(0);
+  const [rowsPerPage, setRowsPerPage] = useState(10);
+  const [viewMode, setViewMode] = useState(VIEW_MODES.CARDS);
+  const [isLoading, setIsLoading] = useState(false);
+  const [activeTab, setActiveTab] = useState(0);
+  const [aiResponse, setAiResponse] = useState(null);
+  const [isAiThinking, setIsAiThinking] = useState(false);
+  const [chatMessages, setChatMessages] = useState([]);
+  
+  // 개선 1: 급여 기록 중심 설계를 위한 상태 추가
+  const [payrollPeriods, setPayrollPeriods] = useState([]); // 급여 기간 목록
+  const [selectedPayrollPeriods, setSelectedPayrollPeriods] = useState([]); // 선택된 급여 기간
+  
+  // 개선 2: 지급일 기준 필터링을 위한 상태
+  const [paymentDateFilter, setPaymentDateFilter] = useState({
+    year: null,
+    month: new Date().getMonth() + 1
+  });
+  
+  // 개선 3: 태그 시스템 도입을 위한 상태
+  const [payrollTags, setPayrollTags] = useState({
+    '정기급여': true,
+    '입사급여': true,
+    '퇴사급여': true,
+    '기타': true
+  });
+  
+  // 데이터 로딩 워크플로우 상태
+  const [dataState, setDataState] = useState({
+    isLoading: false,
+    isError: false,
+    errorMessage: ''
   });
 
-  // 상태 추가
+  // 검색어 관련
   const [searchQuery, setSearchQuery] = useState('');
   const [openDialog, setOpenDialog] = useState(false);
   const [duplicateEmployees, setDuplicateEmployees] = useState([]);
@@ -125,42 +155,22 @@ const PayrollAnalysis = () => {
   // 고급 검색 펼침 상태 관리를 위한 상태 추가
   const [expandedAdvanced, setExpandedAdvanced] = useState(false);
 
-  // 페이지네이션을 위한 상태 추가
-  const [page, setPage] = useState(0);
-  const [rowsPerPage] = useState(20);
-
   // AI 채팅 관련 상태 추가
-  const [chatMessages, setChatMessages] = useState([]);
   const [inputMessage, setInputMessage] = useState('');
-  const [isAiThinking, setIsAiThinking] = useState(false);
-
-  // 새로운 상태 추가
-  const [activeTab, setActiveTab] = useState(SALARY_TABS.TOTAL.id);
 
   // 전체 검색 상태 추가
   const [allSearch, setAllSearch] = useState(false);
 
-  // 불필요한 벡터 스토어 및 RAG 시스템 관련 상태 제거
+  // 불필요한 벡터 스토어 관련 상태 제거
   const [isAnalyzing, setIsAnalyzing] = useState(false);
   const [analysisResult, setAnalysisResult] = useState(null);
 
-  // 로딩 상태 관리를 위한 state 추가
-  const [isLoading, setIsLoading] = useState(false);
-  // 벡터 스토어 관련 상태 제거
+  // 필요한 진행 상태는 유지
   const [processingState, setProcessingState] = useState({
     status: 'idle',
     progress: 0,
     message: ''
   });
-
-  // 최대/최소 날짜 상태 추가
-  const [maxDate, setMaxDate] = useState(null);
-  const [minDate, setMinDate] = useState(null);
-
-  // 검색어 변경 핸들러
-  const handleSearchQueryChange = useCallback((value) => {
-    setSearchQuery(value);
-  }, []);
 
   // DatePicker 공통 스타일 수정
   const datePickerStyle = {
@@ -187,56 +197,362 @@ const PayrollAnalysis = () => {
   // 데이터 로딩
   const loadData = async () => {
     try {
-      console.log('데이터 로딩 시작');
+      setDataState({
+        isLoading: true,
+        isError: false,
+        errorMessage: ''
+      });
       
-      // CSV 파일 로드 대신 백엔드 API 호출
-      // 직원 데이터 로드
+      // 직원 데이터 로드 - 프록시 사용
+      console.log('직원 데이터 요청 시작');
       const employeesResponse = await fetch('/api/employees');
       if (!employeesResponse.ok) {
         throw new Error(`직원 데이터 로딩 실패: ${employeesResponse.status}`);
       }
       const employees = await employeesResponse.json();
+      console.log('직원 데이터 로드 완료:', employees.length, '명');
       
-      // 확정된 급여 데이터만 로드 (confirmed 또는 paid 상태)
+      // 확정된 급여 데이터만 로드 (confirmed 또는 paid 상태) - 프록시 사용
+      console.log('급여 데이터 요청 시작');
       const payrollResponse = await fetch('/api/payroll/records?status=confirmed,paid');
       if (!payrollResponse.ok) {
-        throw new Error(`급여 데이터 로딩 실패: ${payrollResponse.status}`);
+        throw new Error(`급여 데이터 로딩 실패: ${payrollResponse.status} ${payrollResponse.statusText}`);
       }
-      const payrollData = await payrollResponse.json();
       
-      console.log('로드된 직원 수:', employees.length);
-      console.log('로드된 급여 데이터 수:', payrollData.length);
+      const payrollData = await payrollResponse.json();
+      console.log('급여 데이터 로드 완료:', payrollData.length, '건');
+      
+      // 데이터가 비어있는 경우 처리
+      if (payrollData.length === 0) {
+        setAlert({
+          open: true,
+          message: '확정된 급여 데이터가 없습니다. 먼저 급여를 계산하고 확정해주세요.',
+          severity: 'warning'
+        });
+        return;
+      }
+      
+      // 급여 데이터 처리 및 태그 부여
+      console.log('급여 데이터 처리 시작');
+      
+      // 원본 데이터 로그
+      console.log('처리할 급여 데이터 예시:', payrollData.length > 0 ? payrollData[0] : '데이터 없음');
+      
+      const processedPayrollData = payrollData.map((payroll, index) => {
+        try {
+          // 계산 기간 설정
+          const start = payroll.payment_period_start;
+          const end = payroll.payment_period_end;
+          
+          // 처리 중인 데이터 로그 (첫 5개만)
+          if (index < 5) {
+            console.log(`급여 기록 #${index+1} 처리:`, {
+              id: payroll.payroll_id,
+              employee: payroll.employee_name,
+              start,
+              end,
+              payment_date: payroll.payment_date
+            });
+          }
+          
+          // 급여 태그 부여 (정기, 입사, 퇴사, 기타)
+          let tag = '정기급여';
+          
+          // 가공된 데이터 생성
+          const processedItem = {
+            ...payroll,
+            calculation_period_start: start,
+            calculation_period_end: end,
+            payroll_tag: tag,
+          };
+          
+          // 제목 생성
+          processedItem.period_title = generatePayrollPeriodTitle(
+            start, 
+            end, 
+            tag, 
+            {
+              name: payroll.employee_name || '이름 없음',
+              department: payroll.department || '부서 없음',
+              position: payroll.position || '직책 없음'
+            }
+          );
+          
+          return processedItem;
+        } catch (error) {
+          console.error(`급여 데이터 #${index+1} 처리 오류:`, error);
+          // 오류 발생 시 원본 데이터에 오류 표시 추가
+          return {
+            ...payroll,
+            period_title: '데이터 처리 오류',
+            payroll_tag: '오류',
+            calculation_period_start: payroll.payment_period_start || dayjs().format('YYYY-MM-DD'),
+            calculation_period_end: payroll.payment_period_end || dayjs().format('YYYY-MM-DD'),
+            error: error.message
+          };
+        }
+      });
+      
+      // 가공된 데이터 로그
+      console.log('처리된 급여 데이터 예시:', processedPayrollData.length > 0 ? processedPayrollData[0] : '데이터 없음');
+      console.log('급여 데이터 처리 완료');
+      
+      // 급여 기간 목록 생성 (중복 제거)
+      const periods = processedPayrollData.map(p => ({
+        id: `${p.payment_date}-${p.payroll_tag}`,
+        title: p.period_title,
+        start_date: p.calculation_period_start,
+        end_date: p.calculation_period_end,
+        payment_date: p.payment_date,
+        tag: p.payroll_tag
+      }));
+      
+      // 중복 제거를 위한 Set 사용
+      const uniquePeriods = Array.from(
+        new Set(periods.map(p => p.id))
+      ).map(id => periods.find(p => p.id === id));
+      
+      // 가장 최근 지급일 기준으로 정렬
+      uniquePeriods.sort((a, b) => new Date(b.payment_date) - new Date(a.payment_date));
       
       setEmployeesData(employees);
-      setPayrollData(payrollData);
-
-      if (payrollData.length > 0) {
-        // 날짜 형식 변환 (백엔드 API 응답에 맞게 조정)
-        const paymentDates = payrollData.map(p => dayjs(p.payment_date));
-        const latestDate = dayjs.max(paymentDates);
-        const earliestDate = dayjs.min(paymentDates);
-        
-        setMaxDate(latestDate);
-        setMinDate(earliestDate);
-        
-        setStartDate(latestDate);
-        setEndDate(latestDate);
+      setPayrollData(processedPayrollData);
+      setPayrollPeriods(uniquePeriods);
+      
+      // 초기 필터링 적용을 위해 최신 급여 기간 선택
+      if (uniquePeriods.length > 0) {
+        setSelectedPayrollPeriods([uniquePeriods[0].id]);
       }
+
+      if (processedPayrollData.length > 0) {
+        try {
+          // 날짜 범위 설정
+          console.log('날짜 범위 설정 시작');
+          
+          const paymentDates = processedPayrollData
+            .filter(p => p.payment_date) // null, undefined 제거
+            .map(p => {
+              const date = dayjs(p.payment_date);
+              console.log(`날짜 변환: ${p.payment_date} -> ${date.isValid() ? date.format('YYYY-MM-DD') : '유효하지 않음'}`);
+              return date;
+            })
+            .filter(date => date.isValid()); // 유효하지 않은 날짜 제거
+          
+          console.log(`변환된 유효한 날짜 수: ${paymentDates.length}`);
+          
+          // 유효한 날짜가 있는 경우에만 max/min 계산
+          if (paymentDates.length > 0) {
+            // max/min을 직접 계산하는 대신 배열을 정렬하여 찾기
+            paymentDates.sort((a, b) => b.valueOf() - a.valueOf()); // 내림차순 정렬
+            
+            const latestDate = paymentDates[0]; // 첫 번째 값이 가장 최근 날짜
+            const earliestDate = paymentDates[paymentDates.length - 1]; // 마지막 값이 가장 오래된 날짜
+            
+            console.log(`최근 날짜: ${latestDate.format('YYYY-MM-DD')}, 가장 오래된 날짜: ${earliestDate.format('YYYY-MM-DD')}`);
+            
+            setMaxDate(latestDate);
+            setMinDate(earliestDate);
+            
+            // 기본적으로 최신 날짜를 선택
+            setStartDate(latestDate.subtract(1, 'month'));
+            setEndDate(latestDate);
+            
+            // 가장 최근 급여 데이터의 연/월을 기본 필터로 설정
+            setPaymentDateFilter({
+              year: latestDate.year(),
+              month: latestDate.month() + 1
+            });
+          } else {
+            // 유효한 날짜가 없는 경우 현재 날짜로 설정
+            const currentDate = dayjs();
+            setMaxDate(currentDate);
+            setMinDate(currentDate.subtract(1, 'year'));
+            setStartDate(currentDate.subtract(1, 'month'));
+            setEndDate(currentDate);
+            setPaymentDateFilter({
+              year: currentDate.year(),
+              month: currentDate.month() + 1
+            });
+          }
+        } catch (error) {
+          console.error('날짜 범위 설정 중 오류:', error);
+          setAlert({
+            open: true,
+            message: '날짜 범위 설정 중 오류가 발생했습니다.',
+            severity: 'error'
+          });
+          
+          // 오류 발생 시 현재 날짜로 기본값 설정
+          const currentDate = dayjs();
+          setMaxDate(currentDate);
+          setMinDate(currentDate.subtract(1, 'year'));
+          setStartDate(currentDate.subtract(1, 'month'));
+          setEndDate(currentDate);
+          setPaymentDateFilter({
+            year: currentDate.year(),
+            month: currentDate.month() + 1
+          });
+        }
+      } else {
+        // 데이터가 없는 경우 현재 날짜 기준으로 설정
+        const currentDate = dayjs();
+        setMaxDate(currentDate);
+        setMinDate(currentDate.subtract(1, 'year'));
+        setStartDate(currentDate.subtract(1, 'month'));
+        setEndDate(currentDate);
+        setPaymentDateFilter({
+          year: currentDate.year(),
+          month: currentDate.month() + 1
+        });
+      }
+      
+      // 필터링 적용
+      applyFilters(processedPayrollData);
+      
     } catch (error) {
       console.error('데이터 로딩 상세 에러:', error);
       setAlert({
         open: true,
-        message: '급여 데이터 로드 중 오류가 발생했습니다.',
+        message: '급여 데이터 로드 중 오류가 발생했습니다.' + (error.message ? ' - ' + error.message : ''),
         severity: 'error'
       });
+      setDataState({
+        isLoading: false,
+        isError: true,
+        errorMessage: error.message
+      });
+    } finally {
+      setDataState(prev => ({...prev, isLoading: false}));
     }
   };
+  
+  // 급여 기간 제목 생성 함수
+  const generatePayrollPeriodTitle = (startDate, endDate, tag, employee) => {
+    console.log('제목 생성 입력값:', startDate, endDate, tag, employee);
+    
+    // 날짜 포맷팅 함수
+    const formatDate = (dateStr) => {
+      if (!dateStr) return '날짜 없음';
+      try {
+        const date = dayjs(dateStr);
+        return date.isValid() ? date.format('YYYY-MM-DD') : '유효하지 않은 날짜';
+      } catch (error) {
+        console.error('날짜 변환 오류:', error);
+        return '날짜 변환 오류';
+      }
+    };
+    
+    const start = formatDate(startDate);
+    const end = formatDate(endDate);
+    
+    // 태그에 따른 제목 생성
+    let periodTitle = '';
+    
+    switch(tag) {
+      case '정기급여':
+        periodTitle = `${start} ~ ${end} 정기급여`;
+        break;
+      case '입사급여':
+        periodTitle = `${employee.name} 입사급여 (${start} ~ ${end})`;
+        break;
+      case '퇴사급여':
+        periodTitle = `${employee.name} 퇴사급여 (${start} ~ ${end})`;
+        break;
+      case '기타':
+        periodTitle = `${start} ~ ${end} 특별급여`;
+        break;
+      default:
+        periodTitle = `${start} ~ ${end} 급여`;
+    }
+    
+    return periodTitle;
+  };
 
-  // 지원금 계산 함수 (단순 임시 로직)
-  function calculateSubsidy(employee, baseSalary) {
-    // 실제로는 더 복잡한 로직이 필요
-    return Math.floor(baseSalary * 0.05); 
-  }
+  // 급여 필터링 로직
+  const applyFilters = useCallback((dataToFilter = payrollData) => {
+    if (!dataToFilter.length) return;
+    
+    let result = [...dataToFilter];
+    
+    // 1. 급여 기록 중심 필터링: 선택된 급여 기간으로 필터링
+    if (selectedPayrollPeriods.length > 0) {
+      result = result.filter(record => {
+        const recordPeriodId = `${record.payment_date}-${record.payroll_tag}`;
+        return selectedPayrollPeriods.includes(recordPeriodId);
+      });
+    }
+    
+    // 2. 태그 시스템 기반 필터링
+    result = result.filter(record => payrollTags[record.payroll_tag] === true);
+    
+    // 3. 지급일 기준 필터링 (연/월)
+    if (paymentDateFilter.year && paymentDateFilter.month) {
+      result = result.filter(record => {
+        if (!record.payment_date) return false;
+        const paymentDate = dayjs(record.payment_date);
+        return paymentDate.isValid() && 
+               paymentDate.year() === paymentDateFilter.year && 
+               paymentDate.month() + 1 === paymentDateFilter.month;
+      });
+    }
+    
+    // 4. 기존 필터 유지 (이름, 부서, 직급 등)
+    // 이름 검색 필터
+    if (nameQuery) {
+      result = result.filter(record => {
+        const employee = employeesData.find(emp => emp.employee_id === record.employee_id) || {};
+        return employee.name?.toLowerCase().includes(nameQuery.toLowerCase());
+      });
+    }
+
+    // 부서 필터
+    if (Object.values(departments).some(val => val === true) && !departments['전체']) {
+      result = result.filter(record => {
+        const employee = employeesData.find(emp => emp.employee_id === record.employee_id) || {};
+        // 부서명에서 불필요한 공백 제거 후 비교
+        const dept = employee.department?.trim();
+        return dept && departments[dept];
+      });
+    }
+
+    // 직급 필터
+    if (Object.values(positions).some(val => val === true) && !positions['전체']) {
+      result = result.filter(record => {
+        const employee = employeesData.find(emp => emp.employee_id === record.employee_id) || {};
+        // 직급명에서 불필요한 공백 제거 후 비교
+        const pos = employee.position?.trim();
+        return pos && positions[pos];
+      });
+    }
+
+    // 날짜 범위 필터 (기간 기준)
+    if (startDate && endDate) {
+      const start = dayjs(startDate).startOf('day');
+      const end = dayjs(endDate).endOf('day');
+      
+      result = result.filter(record => {
+        if (!record.payment_date) return false;
+        const paymentDate = dayjs(record.payment_date);
+        return paymentDate.isValid() && (
+          (paymentDate.isAfter(start) || paymentDate.isSame(start)) && 
+          (paymentDate.isBefore(end) || paymentDate.isSame(end))
+        );
+      });
+    }
+    
+    setFilteredData(result);
+    setPage(0); // 페이지 리셋
+  }, [payrollData, nameQuery, departments, positions, startDate, endDate, selectedPayrollPeriods, payrollTags, paymentDateFilter, employeesData]);
+
+  // 엔드포인트에서 가져온 데이터에 필터 적용
+  useEffect(() => {
+    applyFilters();
+  }, [applyFilters]);
+
+  // 데이터 로드
+  useEffect(() => {
+    loadData();
+  }, []);
 
   // 부서 필터 상태 업데이트
   const handleDepartmentChange = (dept) => {
@@ -257,82 +573,6 @@ const PayrollAnalysis = () => {
       });
     }
   };
-
-  // 급여 필터링 로직
-  const applyFilters = useCallback(() => {
-    if (!payrollData.length) return;
-    
-    console.log('필터링 시작', {
-      nameQuery,
-      departments,
-      startDate: startDate?.format('YYYY-MM-DD'),
-      endDate: endDate?.format('YYYY-MM-DD'),
-      positions
-    });
-
-    let result = [...payrollData];
-
-    // 이름 검색 필터
-    if (nameQuery) {
-      const employeeIds = employeesData
-        .filter(emp => emp.name.includes(nameQuery))
-        .map(emp => emp.employee_id);
-      
-      result = result.filter(record => employeeIds.includes(record.employee_id));
-    }
-
-    // 부서 필터
-    const selectedDepartments = Object.entries(departments)
-      .filter(([_, isSelected]) => isSelected)
-      .map(([dept, _]) => dept);
-
-    if (selectedDepartments.length > 0 && !selectedDepartments.includes('전체')) {
-      const employeeIds = employeesData
-        .filter(emp => selectedDepartments.includes(emp.department))
-        .map(emp => emp.employee_id);
-      
-      result = result.filter(record => employeeIds.includes(record.employee_id));
-    }
-
-    // 직급 필터
-    const selectedPositions = Object.entries(positions)
-      .filter(([_, isSelected]) => isSelected)
-      .map(([pos, _]) => pos);
-
-    if (selectedPositions.length > 0 && !selectedPositions.includes('전체')) {
-      const employeeIds = employeesData
-        .filter(emp => selectedPositions.includes(emp.position))
-        .map(emp => emp.employee_id);
-      
-      result = result.filter(record => employeeIds.includes(record.employee_id));
-    }
-
-    // 날짜 필터
-    if (startDate && endDate) {
-      result = result.filter(record => {
-        const recordDate = dayjs(record.payment_date);
-        return (
-          recordDate.isAfter(startDate, 'day') || recordDate.isSame(startDate, 'day')
-        ) && (
-          recordDate.isBefore(endDate, 'day') || recordDate.isSame(endDate, 'day')
-        );
-      });
-    }
-
-    console.log(`필터링 결과: ${result.length}건`);
-    setFilteredData(result);
-    setPage(0); // 페이지 리셋
-  }, [payrollData, nameQuery, departments, positions, startDate, endDate, employeesData]);
-
-  // 엔드포인트에서 가져온 데이터에 필터 적용
-  useEffect(() => {
-    applyFilters();
-  }, [applyFilters]);
-
-  // 데이터 로드
-  useEffect(() => {
-    loadData();
-  }, []);
 
   // 빠른 날짜 범위 설정
   const setQuickDateFilter = (range) => {
@@ -363,19 +603,21 @@ const PayrollAnalysis = () => {
 
   // AI 쿼리 처리 핸들러
   const handleAIQuery = async (query) => {
-    if (!query) return;
+    if (!query || !query.trim()) return;
     
     try {
+      // 입력 필드 초기화
+      setInputMessage('');
+      
       // 사용자 메시지 추가
       const userMessage = { role: 'user', content: query };
       setChatMessages(prev => [...prev, userMessage]);
       setIsAiThinking(true);
       
-      console.log('AI 분석 요청 준비:', {
-        filteredDataLength: filteredData.length,
-        employeesDataLength: employeesData.length,
-        query
-      });
+      // 필터링 데이터 없는 경우 처리
+      if (filteredData.length === 0) {
+        throw new Error('분석할 데이터가 없습니다. 필터를 조정하거나 데이터를 확인해주세요.');
+      }
 
       // 백엔드 API 호출로 변경
       const result = await analyzeData(filteredData, employeesData, query);
@@ -401,7 +643,6 @@ const PayrollAnalysis = () => {
       });
     } finally {
       setIsAiThinking(false);
-      setInputMessage('');
     }
   };
 
@@ -466,329 +707,472 @@ const PayrollAnalysis = () => {
     page * rowsPerPage + rowsPerPage
   );
 
+  // 직급 필터 상태 업데이트
+  const handlePositionChange = (pos) => {
+    if (pos === '전체') {
+      // 전체 선택 시 모든 직급 선택/해제 토글
+      const allSelected = !positions['전체'];
+      const newPositions = Object.keys(positions).reduce((acc, curr) => {
+        acc[curr] = allSelected;
+        return acc;
+      }, {});
+      setPositions(newPositions);
+    } else {
+      // 개별 직급 선택 토글
+      setPositions({
+        ...positions,
+        [pos]: !positions[pos],
+        '전체': false
+      });
+    }
+  };
+
+  // 급여 기간 선택 변경 핸들러
+  const handlePayrollPeriodChange = (periodId) => {
+    // 이미 선택된 경우 제거, 아니면 추가 (다중 선택 지원)
+    setSelectedPayrollPeriods(prev => {
+      if (prev.includes(periodId)) {
+        return prev.filter(id => id !== periodId);
+      } else {
+        return [...prev, periodId];
+      }
+    });
+  };
+  
+  // 급여 태그 필터 변경 핸들러
+  const handleTagFilterChange = (tag) => {
+    setPayrollTags(prev => ({
+      ...prev,
+      [tag]: !prev[tag]
+    }));
+  };
+  
+  // 지급일 필터 변경 핸들러
+  const handlePaymentDateFilterChange = (year, month) => {
+    setPaymentDateFilter({
+      year,
+      month
+    });
+  };
+
+  useEffect(() => {
+    // 급여 데이터가 로드되면 사용 가능한 연도 목록 설정
+    if (payrollData.length > 0) {
+      const availableYears = Array.from(
+        new Set(payrollData
+          .filter(p => p.payment_date)
+          .map(p => dayjs(p.payment_date).year())
+        )
+      );
+      
+      if (availableYears.length > 0) {
+        // 가장 최근 연도를 기본값으로 설정
+        const latestYear = Math.max(...availableYears);
+        setPaymentDateFilter(prev => ({
+          ...prev,
+          year: latestYear
+        }));
+      } else {
+        // 급여 데이터가 있지만 유효한 날짜가 없는 경우 현재 연도 사용
+        setPaymentDateFilter(prev => ({
+          ...prev,
+          year: new Date().getFullYear()
+        }));
+      }
+    }
+  }, [payrollData]);
+
   return (
     <ThemeProvider theme={theme}>
-      <Container maxWidth="xl" sx={{ mt: 3, mb: 8 }}>
-        <GlobalTabs activeTab="payrollAnalysis" />
-        
-        <Typography variant="h4" sx={{ mb: 3, fontWeight: 'bold', color: '#333' }}>
-          급여 분석
-        </Typography>
-        
-        <Grid container spacing={3}>
-          {/* 왼쪽 영역: 검색 필터 */}
-          <Grid item xs={12} md={3}>
-            <StyledPaper elevation={1} sx={{ p: 2, height: '100%' }}>
-              <Typography variant="h6" sx={{ mb: 2, fontWeight: 'bold' }}>
-                검색 필터
-              </Typography>
-              
-              {/* 이름 검색 */}
-              <TextField
-                fullWidth
-                label="직원명"
-                variant="outlined"
-                size="small"
-                value={nameQuery}
-                onChange={(e) => setNameQuery(e.target.value)}
-                margin="normal"
-                placeholder="직원 이름 검색..."
-              />
-              
-              {/* 부서 필터 */}
-              <Typography variant="subtitle2" sx={{ mt: 2, mb: 1, fontWeight: 'bold' }}>
-                부서별 필터
-              </Typography>
-              <FormGroup row>
-                {Object.keys(departmentMap).map((dept) => (
-                  <FormControlLabel
-                    key={dept}
-                    control={
-                      <Checkbox 
-                        checked={departments[departmentMap[dept]]}
-                        onChange={() => handleDepartmentChange(departmentMap[dept])}
-                        size="small"
+      <Box sx={commonStyles.pageContainer}>
+        <GlobalTabs />
+        <Container maxWidth="xl" sx={{ mt: 4, mb: 4 }}>
+          <Typography variant="h4" sx={{ fontWeight: 600, color: theme.palette.text.primary }}>
+            급여 분석
+          </Typography>
+          <Typography variant="body1" sx={{ color: theme.palette.text.secondary, mb: 4 }}>
+            지급된 급여 데이터를 분석하고 검색합니다.
+          </Typography>
+
+          {dataState.isLoading && (
+            <Box sx={{ display: 'flex', justifyContent: 'center', my: 4 }}>
+              <CircularProgress />
+            </Box>
+          )}
+
+          {dataState.isError && (
+            <Alert severity="error" sx={{ my: 2 }}>
+              데이터 로딩 중 오류가 발생했습니다: {dataState.errorMessage}
+            </Alert>
+          )}
+
+          {!dataState.isLoading && !dataState.isError && payrollData.length === 0 && (
+            <Alert severity="info" sx={{ my: 2 }}>
+              아직 확정된 급여 데이터가 없습니다. 먼저 급여 계산 및 확정을 진행해주세요.
+            </Alert>
+          )}
+
+          {!dataState.isLoading && !dataState.isError && payrollData.length > 0 && (
+            <Grid container spacing={3}>
+              <Grid item xs={12} md={3}>
+                <StyledPaper elevation={1} sx={{ p: 2 }}>
+                  <Typography variant="h5" sx={{ mb: 2, fontWeight: 600 }}>
+                    급여 데이터 필터
+                  </Typography>
+                  
+                  <Typography variant="subtitle1" sx={{ mt: 2, mb: 1, fontWeight: 600 }}>
+                    급여 기록 선택
+                  </Typography>
+                  
+                  <List sx={{ maxHeight: '250px', overflow: 'auto', bgcolor: 'background.paper', border: '1px solid #eee', borderRadius: 1 }}>
+                    {payrollPeriods.map((period) => (
+                      <ListItem 
+                        key={period.id}
+                        dense
+                        secondaryAction={
+                          <Checkbox
+                            edge="end"
+                            checked={selectedPayrollPeriods.includes(period.id)}
+                            onChange={() => handlePayrollPeriodChange(period.id)}
+                          />
+                        }
+                      >
+                        <ListItemText 
+                          primary={period.title}
+                          primaryTypographyProps={{ variant: 'body2' }}
+                          secondary={
+                            <React.Fragment>
+                              <Typography variant="caption" component="div" display="block">
+                                지급일: {dayjs(period.payment_date).format('YYYY-MM-DD')}
+                              </Typography>
+                              <Typography variant="caption" component="div" display="block">
+                                계산기간: {dayjs(period.start_date).format('YYYY-MM-DD')} ~ {dayjs(period.end_date).format('YYYY-MM-DD')}
+                              </Typography>
+                              <Box component="div">
+                                <Chip 
+                                  size="small" 
+                                  label={period.tag} 
+                                  sx={{ 
+                                    mt: 0.5, 
+                                    fontSize: '0.6rem', 
+                                    height: 20,
+                                    bgcolor: period.tag === '정기급여' ? '#e3f2fd' :
+                                             period.tag === '입사급여' ? '#e8f5e9' :
+                                             period.tag === '퇴사급여' ? '#fff3e0' : '#f5f5f5' 
+                                  }} 
+                                />
+                              </Box>
+                            </React.Fragment>
+                          }
+                        />
+                      </ListItem>
+                    ))}
+                  </List>
+                  
+                  <Typography variant="subtitle1" sx={{ mt: 3, mb: 1, fontWeight: 600 }}>
+                    급여 태그 필터
+                  </Typography>
+                  <FormGroup row>
+                    {Object.keys(payrollTags).map((tag) => (
+                      <FormControlLabel
+                        key={tag}
+                        control={
+                          <Checkbox 
+                            checked={payrollTags[tag]}
+                            onChange={() => handleTagFilterChange(tag)}
+                            size="small"
+                          />
+                        }
+                        label={tag}
+                        sx={{ width: '50%', mr: 0 }}
                       />
-                    }
-                    label={dept}
-                    sx={{ width: '50%', mr: 0 }}
-                  />
-                ))}
-              </FormGroup>
-              
-              {/* 직급 필터 */}
-              <Typography variant="subtitle2" sx={{ mt: 2, mb: 1, fontWeight: 'bold' }}>
-                직급별 필터
-              </Typography>
-              <FormGroup row>
-                {Object.keys(positions).map((pos) => (
-                  <FormControlLabel
-                    key={pos}
-                    control={
-                      <Checkbox 
-                        checked={positions[pos]}
-                        onChange={() => setPositions({...positions, [pos]: !positions[pos]})}
+                    ))}
+                  </FormGroup>
+                  
+                  <Typography variant="subtitle1" sx={{ mt: 3, mb: 1, fontWeight: 600 }}>
+                    지급월 선택
+                  </Typography>
+                  <Grid container spacing={1}>
+                    <Grid item xs={6}>
+                      <TextField
+                        select
+                        fullWidth
                         size="small"
-                      />
-                    }
-                    label={pos}
-                    sx={{ width: '50%', mr: 0 }}
-                  />
-                ))}
-              </FormGroup>
-              
-              {/* 급여 지급 기간 필터 */}
-              <Typography variant="subtitle2" sx={{ mt: 2, mb: 1, fontWeight: 'bold' }}>
-                급여 지급 기간
-              </Typography>
-              
-              {/* 빠른 기간 선택 */}
-              <ButtonGroup size="small" sx={{ mb: 2, display: 'flex' }}>
-                <Button 
-                  variant={quickDateRange === '1m' ? 'contained' : 'outlined'}
-                  onClick={() => setQuickDateFilter('1m')}
-                  sx={{ flex: 1 }}
-                >
-                  1개월
-                </Button>
-                <Button 
-                  variant={quickDateRange === '3m' ? 'contained' : 'outlined'}
-                  onClick={() => setQuickDateFilter('3m')}
-                  sx={{ flex: 1 }}
-                >
-                  3개월
-                </Button>
-                <Button 
-                  variant={quickDateRange === '6m' ? 'contained' : 'outlined'}
-                  onClick={() => setQuickDateFilter('6m')}
-                  sx={{ flex: 1 }}
-                >
-                  6개월
-                </Button>
-                <Button 
-                  variant={quickDateRange === '1y' ? 'contained' : 'outlined'}
-                  onClick={() => setQuickDateFilter('1y')}
-                  sx={{ flex: 1 }}
-                >
-                  1년
-                </Button>
-              </ButtonGroup>
-              
-              {/* 시작일 선택 */}
-              <LocalizationProvider dateAdapter={AdapterDayjs}>
-                <DatePicker
-                  label="시작일"
-                  value={startDate}
-                  onChange={(newValue) => setStartDate(newValue)}
-                  renderInput={(params) => <TextField {...params} fullWidth size="small" margin="normal" />}
-                  sx={datePickerStyle}
-                  format="YYYY-MM-DD"
-                  maxDate={endDate || undefined}
-                />
-                
-                {/* 종료일 선택 */}
-                <DatePicker
-                  label="종료일"
-                  value={endDate}
-                  onChange={(newValue) => setEndDate(newValue)}
-                  renderInput={(params) => <TextField {...params} fullWidth size="small" margin="normal" />}
-                  sx={datePickerStyle}
-                  format="YYYY-MM-DD"
-                  minDate={startDate || undefined}
-                />
-              </LocalizationProvider>
-              
-              {/* 필터 적용 버튼 */}
-              <StyledButton
-                variant="contained"
-                fullWidth
-                sx={{ mt: 2 }}
-                onClick={applyFilters}
-              >
-                검색
-              </StyledButton>
-            </StyledPaper>
-          </Grid>
-          
-          {/* 오른쪽 영역: 검색 결과 및 AI 분석 */}
-          <Grid item xs={12} md={9}>
-            {/* 검색 결과 영역 */}
-            <StyledPaper elevation={1} sx={{ p: 2, mb: 3 }}>
-              <Box sx={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', mb: 2 }}>
-                <Typography variant="h6" sx={{ fontWeight: 'bold' }}>
-                  급여 데이터 검색 결과
-                </Typography>
-                <Typography variant="body2">
-                  검색 결과: <strong>{integratedData.length}</strong>건
-                </Typography>
-              </Box>
-              
-              {/* 테이블 */}
-              <TableContainer sx={{ maxHeight: 400 }}>
-                <Table stickyHeader size="small">
-                  <TableHead>
-                    <TableRow>
-                      <TableCell>직원명</TableCell>
-                      <TableCell>부서</TableCell>
-                      <TableCell>직급</TableCell>
-                      <TableCell>지급일</TableCell>
-                      <TableCell align="right">기본급</TableCell>
-                      <TableCell align="right">총급여</TableCell>
-                    </TableRow>
-                  </TableHead>
-                  <TableBody>
-                    {currentPageData.length > 0 ? (
-                      currentPageData.map((row, index) => (
-                        <TableRow key={`${row.employee_id}-${row.payment_date}-${index}`}>
-                          <TableCell>{row.name}</TableCell>
-                          <TableCell>{row.department}</TableCell>
-                          <TableCell>{row.position}</TableCell>
-                          <TableCell>
-                            {dayjs(row.payment_date).format('YYYY-MM-DD')}
-                          </TableCell>
-                          <TableCell align="right">
-                            {Number(row.base_salary).toLocaleString()}원
-                          </TableCell>
-                          <TableCell align="right">
-                            {Number(row.gross_salary).toLocaleString()}원
-                          </TableCell>
-                        </TableRow>
-                      ))
-                    ) : (
-                      <TableRow>
-                        <TableCell colSpan={6} align="center">
-                          {isLoading ? (
-                            <CircularProgress size={24} />
-                          ) : (
-                            '검색 결과가 없습니다.'
-                          )}
-                        </TableCell>
-                      </TableRow>
-                    )}
-                  </TableBody>
-                </Table>
-              </TableContainer>
-              
-              {/* 페이지네이션 */}
-              <TablePagination
-                component="div"
-                count={integratedData.length}
-                page={page}
-                onPageChange={handleChangePage}
-                rowsPerPage={rowsPerPage}
-                rowsPerPageOptions={[20]}
-              />
-            </StyledPaper>
-            
-            {/* AI 분석 영역 */}
-            <StyledPaper elevation={1} sx={{ p: 2 }}>
-              <Typography variant="h6" sx={{ mb: 2, fontWeight: 'bold' }}>
-                AI 분석
-              </Typography>
-              
-              {/* 질문 예시 칩 */}
-              <Box sx={{ mb: 2, display: 'flex', flexWrap: 'wrap', gap: 1 }}>
-                <Typography variant="body2" sx={{ mr: 1, alignSelf: 'center' }}>
-                  질문 예시:
-                </Typography>
-                {[
-                  '부서별 평균 급여는?',
-                  '최고/최저 급여 직원은?',
-                  '지난 3개월간 급여 트렌드',
-                  '직급별 급여 분포는?'
-                ].map((question, i) => (
-                  <Chip
-                    key={i}
-                    label={question}
+                        label="년도"
+                        value={paymentDateFilter.year || ''}
+                        onChange={(e) => handlePaymentDateFilterChange(parseInt(e.target.value), paymentDateFilter.month)}
+                      >
+                        {payrollData.length > 0 ? 
+                          Array.from(new Set(payrollData
+                            .filter(p => p.payment_date)
+                            .map(p => dayjs(p.payment_date).year())
+                          )).sort().reverse().map((year) => (
+                            <MenuItem key={year} value={year}>{year}년</MenuItem>
+                          ))
+                          :
+                          <MenuItem value={new Date().getFullYear()}>{new Date().getFullYear()}년</MenuItem>
+                        }
+                      </TextField>
+                    </Grid>
+                    <Grid item xs={6}>
+                      <TextField
+                        select
+                        fullWidth
+                        size="small"
+                        label="월"
+                        value={paymentDateFilter.month}
+                        onChange={(e) => handlePaymentDateFilterChange(paymentDateFilter.year, parseInt(e.target.value))}
+                      >
+                        {[...Array(12)].map((_, i) => (
+                          <MenuItem key={i+1} value={i+1}>{i+1}월</MenuItem>
+                        ))}
+                      </TextField>
+                    </Grid>
+                  </Grid>
+                  
+                  <Divider sx={{ my: 3 }} />
+                  
+                  <Typography variant="subtitle1" sx={{ fontWeight: 600 }}>
+                    직원 기준 필터
+                  </Typography>
+                  
+                  <TextField
+                    fullWidth
+                    label="직원명"
                     variant="outlined"
                     size="small"
-                    onClick={() => setInputMessage(question)}
-                    sx={{ cursor: 'pointer' }}
+                    value={nameQuery}
+                    onChange={(e) => setNameQuery(e.target.value)}
+                    margin="normal"
+                    placeholder="직원 이름 검색..."
                   />
-                ))}
-              </Box>
+                  
+                  <Typography variant="subtitle2" sx={{ mt: 2, mb: 1, fontWeight: 'bold' }}>
+                    부서별 필터
+                  </Typography>
+                  <FormGroup row>
+                    {Object.keys(departmentMap).map((dept) => (
+                      <FormControlLabel
+                        key={dept}
+                        control={
+                          <Checkbox 
+                            checked={departments[departmentMap[dept]]}
+                            onChange={() => handleDepartmentChange(departmentMap[dept])}
+                            size="small"
+                          />
+                        }
+                        label={dept}
+                        sx={{ width: '50%', mr: 0 }}
+                      />
+                    ))}
+                  </FormGroup>
+                  
+                  <Typography variant="subtitle2" sx={{ mt: 2, mb: 1, fontWeight: 'bold' }}>
+                    직급별 필터
+                  </Typography>
+                  <FormGroup row>
+                    {Object.keys(positions).map((pos) => (
+                      <FormControlLabel
+                        key={pos}
+                        control={
+                          <Checkbox 
+                            checked={positions[pos]}
+                            onChange={() => handlePositionChange(pos)}
+                            size="small"
+                          />
+                        }
+                        label={pos}
+                        sx={{ width: '50%', mr: 0 }}
+                      />
+                    ))}
+                  </FormGroup>
+                  
+                  <Button
+                    variant="contained"
+                    color="primary"
+                    fullWidth
+                    sx={{ mt: 3 }}
+                    onClick={() => applyFilters()}
+                  >
+                    필터 적용 & 검색
+                  </Button>
+                </StyledPaper>
+              </Grid>
               
-              {/* 채팅 메시지 표시 영역 */}
-              <Paper
-                variant="outlined"
-                sx={{
-                  p: 2,
-                  mb: 2,
-                  height: '300px',
-                  overflow: 'auto',
-                  bgcolor: '#fafafa',
-                  borderRadius: 1
-                }}
-              >
-                {chatMessages.length === 0 ? (
-                  <Box sx={{ textAlign: 'center', color: 'text.secondary', mt: 10 }}>
-                    <Typography variant="body2">
-                      질문을 입력하여 급여 데이터에 대한 AI 분석을 받아보세요.
+              <Grid item xs={12} md={9}>
+                <StyledPaper elevation={1}>
+                  <Box sx={{ p: 2, display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                    <Typography variant="h6">
+                      검색 결과 ({filteredData.length}건)
                     </Typography>
+                    <Box>
+                      <ButtonGroup variant="outlined" size="small">
+                        <Button 
+                          variant={viewMode === VIEW_MODES.CARDS ? 'contained' : 'outlined'}
+                          onClick={() => setViewMode(VIEW_MODES.CARDS)}
+                        >
+                          카드뷰
+                        </Button>
+                        <Button 
+                          variant={viewMode === VIEW_MODES.TABLE ? 'contained' : 'outlined'}
+                          onClick={() => setViewMode(VIEW_MODES.TABLE)}
+                        >
+                          테이블뷰
+                        </Button>
+                      </ButtonGroup>
+                    </Box>
                   </Box>
-                ) : (
-                  chatMessages.map((msg, index) => (
-                    <Box
-                      key={index}
-                      sx={{
-                        mb: 2,
-                        display: 'flex',
-                        flexDirection: 'column',
-                        alignItems: msg.role === 'user' ? 'flex-end' : 'flex-start'
+
+                  <Divider />
+                  
+                  {viewMode === VIEW_MODES.CARDS && (
+                    <Box sx={{ p: 2 }}>
+                      <Grid container spacing={2}>
+                        {filteredData.slice(page * rowsPerPage, page * rowsPerPage + rowsPerPage).map((record, index) => (
+                          <Grid item xs={12} sm={6} md={4} key={`${record.payroll_code}-${index}`}>
+                            <Card elevation={1}>
+                              <CardHeader
+                                title={record.employee_name}
+                                subheader={`${record.department} / ${record.position}`}
+                                titleTypographyProps={{ variant: 'subtitle1', fontWeight: 'bold' }}
+                                subheaderTypographyProps={{ variant: 'body2' }}
+                                action={
+                                  <Chip 
+                                    size="small" 
+                                    label={record.payroll_tag} 
+                                    sx={{ 
+                                      fontSize: '0.7rem',
+                                      bgcolor: record.payroll_tag === '정기급여' ? '#e3f2fd' :
+                                               record.payroll_tag === '입사급여' ? '#e8f5e9' :
+                                               record.payroll_tag === '퇴사급여' ? '#fff3e0' : '#f5f5f5' 
+                                    }} 
+                                  />
+                                }
+                              />
+                              <CardContent>
+                                <Typography variant="body2" color="text.secondary" gutterBottom>
+                                  <Box component="span" fontWeight="bold">지급일:</Box> {dayjs(record.payment_date).format('YYYY-MM-DD')}
+                                </Typography>
+                                <Typography variant="body2" color="text.secondary" gutterBottom>
+                                  <Box component="span" fontWeight="bold">계산기간:</Box> {dayjs(record.calculation_period_start).format('YYYY-MM-DD')} ~ {dayjs(record.calculation_period_end).format('YYYY-MM-DD')} ({record.calculation_period_days}일간)
+                                </Typography>
+                                <Typography variant="body2" sx={{ mt: 1, color: 'primary.main', fontWeight: 'bold' }}>
+                                  총지급액: {Number(record.gross_pay).toLocaleString()}원
+                                </Typography>
+                                <Typography variant="body2" color="text.secondary">
+                                  공제액: {Number(record.deduction).toLocaleString()}원
+                                </Typography>
+                                <Typography variant="body2" color="text.secondary">
+                                  실지급액: {Number(record.net_pay).toLocaleString()}원
+                                </Typography>
+                              </CardContent>
+                            </Card>
+                          </Grid>
+                        ))}
+                      </Grid>
+                    </Box>
+                  )}
+                  
+                  <Box sx={{ p: 2, display: 'flex', justifyContent: 'center' }}>
+                    <TablePagination
+                      component="div"
+                      count={filteredData.length}
+                      page={page}
+                      onPageChange={handleChangePage}
+                      rowsPerPage={rowsPerPage}
+                      onRowsPerPageChange={(e) => {
+                        setRowsPerPage(parseInt(e.target.value, 10));
+                        setPage(0);
+                      }}
+                      rowsPerPageOptions={[5, 10, 25]}
+                      labelRowsPerPage="페이지당 항목수"
+                    />
+                  </Box>
+                  
+                  {/* AI 분석 대화창 */}
+                  <Divider sx={{ my: 2 }} />
+                  
+                  <Box sx={{ p: 2 }}>
+                    <Typography variant="h6" sx={{ mb: 2 }}>
+                      AI 급여 분석 도우미
+                    </Typography>
+                    
+                    <Paper 
+                      elevation={0}
+                      sx={{ 
+                        p: 2, 
+                        mb: 2, 
+                        maxHeight: '300px', 
+                        overflowY: 'auto',
+                        bgcolor: 'grey.50' 
                       }}
                     >
-                      <Paper
-                        elevation={0}
-                        sx={{
-                          p: 1.5,
-                          maxWidth: '80%',
-                          bgcolor: msg.role === 'user' ? '#e3f2fd' : '#fff',
-                          borderRadius: 2,
-                          border: '1px solid',
-                          borderColor: msg.role === 'user' ? '#bbdefb' : '#e0e0e0'
-                        }}
-                      >
-                        <Typography variant="body2" sx={{ whiteSpace: 'pre-wrap' }}>
-                          {msg.content}
+                      {chatMessages.length === 0 ? (
+                        <Typography variant="body2" color="text.secondary" align="center">
+                          AI 분석 도우미에게 급여 데이터에 대해 질문해보세요.
+                          <br />예시: "이번 달 부서별 평균 급여는 얼마인가요?", "야근 수당이 가장 많은 직원은 누구인가요?"
                         </Typography>
-                      </Paper>
-                    </Box>
-                  ))
-                )}
-                {isAiThinking && (
-                  <Box sx={{ display: 'flex', ml: 1 }}>
-                    <CircularProgress size={20} sx={{ mr: 1 }} />
-                    <Typography variant="body2" sx={{ color: 'text.secondary' }}>
-                      AI가 분석 중입니다...
-                    </Typography>
+                      ) : (
+                        chatMessages.map((msg, index) => (
+                          <Box 
+                            key={index} 
+                            sx={{ 
+                              mb: 2, 
+                              display: 'flex', 
+                              justifyContent: msg.role === 'user' ? 'flex-end' : 'flex-start' 
+                            }}
+                          >
+                            <Paper 
+                              elevation={1} 
+                              sx={{ 
+                                p: 1.5, 
+                                maxWidth: '80%', 
+                                borderRadius: '8px',
+                                bgcolor: msg.role === 'user' ? 'primary.light' : 'background.paper',
+                                color: msg.role === 'user' ? 'primary.contrastText' : 'text.primary'
+                              }}
+                            >
+                              <Typography variant="body2">{msg.content}</Typography>
+                            </Paper>
+                          </Box>
+                        ))
+                      )}
+                      
+                      {isAiThinking && (
+                        <Box sx={{ display: 'flex', alignItems: 'center', ml: 1 }}>
+                          <CircularProgress size={16} sx={{ mr: 1 }} />
+                          <Typography variant="body2" color="text.secondary">
+                            분석 중...
+                          </Typography>
+                        </Box>
+                      )}
+                    </Paper>
+                    
+                    <AIMessageInput 
+                      value={inputMessage}
+                      onChange={(e) => setInputMessage(e.target.value)}
+                      onSubmit={handleAIQuery}
+                      disabled={isAiThinking}
+                      placeholder="급여 데이터에 대해 질문하세요..."
+                    />
                   </Box>
-                )}
-              </Paper>
-              
-              {/* 입력 컴포넌트 */}
-              <AIMessageInput
-                value={inputMessage}
-                onChange={(e) => setInputMessage(e.target.value)}
-                onSend={() => handleAIQuery(inputMessage)}
-                placeholder="급여 데이터에 대해 질문하세요..."
-                disabled={isAiThinking}
-              />
-            </StyledPaper>
-          </Grid>
-        </Grid>
-        
-        {/* 알림 스낵바 */}
-        <Snackbar
-          open={alert.open}
-          autoHideDuration={6000}
-          onClose={handleAlertClose}
-          anchorOrigin={{ vertical: 'bottom', horizontal: 'center' }}
-        >
-          <Alert onClose={handleAlertClose} severity={alert.severity}>
-            {alert.message}
-          </Alert>
-        </Snackbar>
-      </Container>
+                </StyledPaper>
+              </Grid>
+            </Grid>
+          )}
+          
+          <Snackbar
+            open={alert.open}
+            autoHideDuration={6000}
+            onClose={handleAlertClose}
+            anchorOrigin={{ vertical: 'bottom', horizontal: 'right' }}
+          >
+            <Alert onClose={handleAlertClose} severity={alert.severity}>
+              {alert.message}
+            </Alert>
+          </Snackbar>
+        </Container>
+      </Box>
     </ThemeProvider>
   );
 };

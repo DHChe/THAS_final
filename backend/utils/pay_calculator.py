@@ -71,8 +71,14 @@ class PayCalculator:
         """
         기본급 계산 함수
 
-        완전한 급여 기간인 경우: 월급여 전체 지급
+        완전한 급여 기간인 경우: 월급여 전체 지급 (날짜 수와 무관하게 고정)
         중도 입사/퇴사 또는 부분 기간인 경우: 일할 계산 (역일수 기준)
+
+        역일수란: 주말, 공휴일 등 실제 근로 제공 여부와 관계없이 해당 기간의 모든 날짜를 포함
+        예) 10월 1일~10일까지 10일 중 주말, 공휴일이 3일 포함되어도 10일 모두 계산
+
+        급여 지급일이 1일인 경우: 이전 달 1일~말일까지
+        급여 지급일이 5일인 경우: 이전 달 5일~현재 달 4일까지
         """
         # 월급여 계산 (연봉 ÷ 12)
         monthly_salary = base_salary / 12
@@ -87,8 +93,22 @@ class PayCalculator:
         # 정상 급여 기간인지 확인 (급여지급일 기준 완전한 한 달)
         is_normal_period = self.is_full_month(start_date, end_date)
 
-        # 정상 급여 기간이고 중도 입사/퇴사가 아닌 경우 월급여 전체 반환
-        if is_normal_period and not (join_date or resignation_date):
+        # 중도 입사/퇴사 여부를 확인하기 위해 입사일과 퇴사일을 datetime 객체로 변환
+        join_dt = datetime.strptime(join_date, "%Y-%m-%d") if join_date else None
+        resign_dt = (
+            datetime.strptime(resignation_date, "%Y-%m-%d")
+            if resignation_date
+            else None
+        )
+
+        # 입사일이 급여 기간 내에 있는지 확인
+        is_mid_entry = join_dt and join_dt > start_dt
+        # 퇴사일이 급여 기간 내에 있는지 확인
+        is_mid_exit = resign_dt and resign_dt < end_dt
+
+        # 정상 급여 기간이고 중도 입사/퇴사가 아닌 경우 월급여 전체 반환 (완전한 월)
+        if is_normal_period and not is_mid_entry and not is_mid_exit:
+            calculation_note = "완전한 월 근무: 월급여 전체 지급"
             return int(monthly_salary)
 
         # 중도 입사/퇴사 또는 부분 기간인 경우 일할 계산
@@ -96,42 +116,39 @@ class PayCalculator:
         hourly_wage = monthly_salary / self.WORK_HOURS_PER_MONTH  # 시간당 임금
         daily_wage = hourly_wage * 8  # 일급 (8시간 기준)
 
-        # 실제 근무 기간 계산 (입사일/퇴사일 고려)
-        if join_date or resignation_date:
-            # 입사일이 있으면 입사일, 없으면 시작일을 실제 시작일로 설정
-            join_dt = (
-                datetime.strptime(join_date, "%Y-%m-%d") if join_date else start_dt
-            )
-            # 퇴사일이 있으면 퇴사일, 없으면 종료일을 실제 종료일로 설정
-            resign_dt = (
-                datetime.strptime(resignation_date, "%Y-%m-%d")
-                if resignation_date
-                else end_dt
-            )
-
+        # 실제 근무 기간 계산
+        if is_mid_entry or is_mid_exit:
             # 실제 시작일은 선택 기간과 입사일 중 더 늦은 날짜
-            effective_start = max(start_dt, join_dt)
+            effective_start = max(start_dt, join_dt) if join_dt else start_dt
 
             # 실제 종료일은 선택 기간과 퇴사일 중 더 이른 날짜
-            effective_end = min(end_dt, resign_dt)
+            effective_end = min(end_dt, resign_dt) if resign_dt else end_dt
 
-            # 실제 근무 일수 계산 (역일수 기준 - 주말, 공휴일 포함)
-            working_days = (effective_end - effective_start).days + 1
+            # 역일수 계산 (주말, 공휴일 포함한 모든 날짜)
+            calendar_days = (effective_end - effective_start).days + 1
+            calculation_note = (
+                f"중도 입사/퇴사 기간: {calendar_days}일 (주말/공휴일 포함 역일수)"
+            )
         else:
-            # 입사일/퇴사일이 없으면 선택 기간 전체가 근무 기간
-            working_days = period_days
+            # 입사일/퇴사일이 없지만 부분 기간인 경우
+            calendar_days = period_days
+            calculation_note = f"부분 기간: {calendar_days}일 (주말/공휴일 포함 역일수)"
 
-        # 하루 통상임금 × 근무 일수 = 기본급
-        base_pay = daily_wage * working_days
+        # 하루 통상임금 × 역일수 = 기본급
+        base_pay = daily_wage * calendar_days
 
-        # 디버깅 정보 출력 (실제 배포 시 제거)
-        print(f"연봉: {base_salary}")
-        print(f"월급여: {monthly_salary}")
-        print(f"시간당 임금: {hourly_wage}")
-        print(f"일급: {daily_wage}")
-        print(f"근무일수: {working_days}")
-        print(f"기본급: {base_pay}")
+        # 계산 내역 로깅 (디버그 정보)
+        calculation_details = {
+            "연봉": f"{base_salary:,}원",
+            "월급여": f"{monthly_salary:,.2f}원",
+            "시간당 임금": f"{hourly_wage:,.2f}원",
+            "일급": f"{daily_wage:,.2f}원",
+            "역일수": f"{calendar_days}일 (주말/공휴일 포함)",
+            "계산방식": calculation_note,
+            "기본급": f"{base_pay:,.2f}원",
+        }
 
+        # 결과값 정수로 반환
         return int(base_pay)
 
     def calculate_overtime_pay(self, attendance_data, hourly_rate):

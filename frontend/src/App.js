@@ -1,6 +1,6 @@
 import React from 'react';
 import { Routes, Route } from 'react-router-dom';
-import { ThemeProvider, createTheme } from '@mui/material/styles';
+import { ThemeProvider } from '@mui/material/styles';
 import CssBaseline from '@mui/material/CssBaseline';
 import Home from './pages/Home';
 import HRManagement from './pages/hr/HRManagement';
@@ -11,52 +11,20 @@ import './styles/fonts.css';
 import { GlobalStyles } from '@mui/material';
 import PerformanceMonitor from './components/monitoring/PerformanceMonitor';
 import { EmployeeProvider } from './context/EmployeeContext';
-
-// MUI 테마 설정
-const theme = createTheme({
-  palette: {
-    primary: {
-      main: '#1976d2',
-    },
-    secondary: {
-      main: '#dc004e',
-    },
-  },
-  typography: {
-    fontFamily: 'Pretendard, Arial, sans-serif',
-    h4: {
-      fontWeight: 700,
-    },
-    h6: {
-      fontWeight: 500,
-    },
-    subtitle1: {
-      fontWeight: 500,
-    },
-    body1: {
-      fontWeight: 400,
-    },
-  },
-  components: {
-    MuiTab: {
-      styleOverrides: {
-        root: {
-          fontFamily: 'Pretendard, Arial, sans-serif',
-        },
-      },
-    },
-  },
-});
+import { globalStyles } from './styles/styles';
+import theme from './styles/theme';
 
 function App() {
   return (
     <ThemeProvider theme={theme}>
       <GlobalStyles
-        styles={{
+        styles={(theme) => ({
           '*': {
             fontFamily: 'Pretendard, -apple-system, sans-serif',
           },
-        }}
+          // 전역 스타일 적용
+          ...globalStyles(theme),
+        })}
       />
       <CssBaseline />
       <EmployeeProvider>

@@ -46,7 +46,6 @@ export const EmployeeProvider = ({ children }) => {
       });
       if (!response.ok) throw new Error(`서버 응답 오류: ${response.status} ${response.statusText}`);
       const data = await response.json();
-      console.log('Raw data from backend:', JSON.stringify(data, null, 2)); // 더 상세한 데이터 출력
       // 데이터 정제: 백엔드 데이터 형식을 유연하게 처리
       const cleanedData = Array.isArray(data) ? data.map(employee => ({
         employee_id: String(employee.employee_id || ''), // 문자열로 강제 변환
@@ -62,7 +61,6 @@ export const EmployeeProvider = ({ children }) => {
         employee.name !== '' && 
         employee.department !== ''
       ) : [];
-      console.log('Cleaned employee data:', JSON.stringify(cleanedData, null, 2)); // 더 상세한 데이터 출력
       setEmployees(cleanedData);
     } catch (error) {
       console.error('직원 데이터 로드 실패:', error);

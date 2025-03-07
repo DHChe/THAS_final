@@ -4,9 +4,35 @@ import { Grid, Paper, Typography } from '@mui/material';
 const PayrollSummary = ({ calculationResults, employees }) => {
   if (!calculationResults || calculationResults.length === 0) return null;
 
-  const totalPayroll = calculationResults.reduce((acc, curr) => acc + (curr?.totalPay || 0), 0);
-  const totalDeductions = calculationResults.reduce((acc, curr) => acc + (curr?.deductions?.nationalPension || 0) + (curr?.deductions?.healthInsurance || 0) + (curr?.deductions?.longTermCare || 0) + (curr?.deductions?.employmentInsurance || 0) + (curr?.taxes?.incomeTax || 0) + (curr?.taxes?.localIncomeTax || 0), 0);
-  const totalNetPay = calculationResults.reduce((acc, curr) => acc + (curr?.netPay || 0), 0);
+  const totalPayroll = calculationResults.reduce((acc, curr) => {
+    const grossPay = curr?.gross_pay || curr?.totalPay || 0;
+    return acc + grossPay;
+  }, 0);
+  
+  const totalDeductions = calculationResults.reduce((acc, curr) => {
+    const nationalPension = curr?.national_pension || 0;
+    const healthInsurance = curr?.health_insurance || 0;
+    const longTermCare = curr?.long_term_care || 0;
+    const employmentInsurance = curr?.employment_insurance || 0;
+    const incomeTax = curr?.income_tax || 0;
+    const residenceTax = curr?.residence_tax || 0;
+
+    const deductions = curr?.deductions || {};
+    const taxes = curr?.taxes || {};
+    
+    return acc + 
+      (nationalPension || deductions?.nationalPension || 0) + 
+      (healthInsurance || deductions?.healthInsurance || 0) + 
+      (longTermCare || deductions?.longTermCare || 0) + 
+      (employmentInsurance || deductions?.employmentInsurance || 0) + 
+      (incomeTax || taxes?.incomeTax || 0) + 
+      (residenceTax || taxes?.localIncomeTax || 0);
+  }, 0);
+  
+  const totalNetPay = calculationResults.reduce((acc, curr) => {
+    const netPay = curr?.net_pay || curr?.netPay || 0;
+    return acc + netPay;
+  }, 0);
 
   return (
     <Grid container spacing={3} sx={{ mb: 4 }}>

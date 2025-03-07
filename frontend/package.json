@@ -49,6 +49,7 @@
     "test:unit": "jest --config jest.config.js",
     "test:watch": "jest --watch --config jest.config.js"
   },
+  "proxy": "http://localhost:5000",
   "browserslist": {
     "production": [
       ">0.2%",

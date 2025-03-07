@@ -1,6 +1,22 @@
-from app.utils.prompt_templates import ANALYSIS_PROMPT_TEMPLATE
+import sys
+import os
+
+sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import logging
 import re
+
+# 분석 프롬프트 템플릿 직접 정의
+ANALYSIS_PROMPT_TEMPLATE = """
+급여 데이터 분석을 요청합니다.
+
+데이터 요약:
+{data_summary}
+
+사용자 질문:
+{user_query}
+
+위 정보를 바탕으로 급여 데이터를 분석하고 인사이트를 제공해주세요.
+"""
 
 
 def safe_int_convert(value):

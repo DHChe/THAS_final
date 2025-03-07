@@ -123,16 +123,16 @@ const PayrollTable = ({ calculationResults, employees, confirmedPayrolls = [] })
                     sx={{ color: '#4d7cfe', background: 'rgba(77, 124, 254, 0.2)', borderRadius: '4px', fontSize: '0.85rem' }}
                   />
                 </TableCell>
-                <TableCell align="right" sx={{ color: '#4d7cfe', padding: '16px', fontSize: '0.95rem' }}>{row.basePay?.toLocaleString() || '-'}원</TableCell>
-                <TableCell align="right" sx={{ color: '#4d7cfe', padding: '16px', fontSize: '0.95rem' }}>{row.overtimePay?.toLocaleString() || '-'}원</TableCell>
-                <TableCell align="right" sx={{ color: '#4d7cfe', padding: '16px', fontSize: '0.95rem' }}>{row.nightPay?.toLocaleString() || '-'}원</TableCell>
-                <TableCell align="right" sx={{ color: '#4d7cfe', padding: '16px', fontSize: '0.95rem' }}>{row.holidayPay?.toLocaleString() || '-'}원</TableCell>
-                <TableCell align="right" sx={{ color: '#ff4d4d' }}>{row.deductions?.nationalPension?.toLocaleString() || '-'}원</TableCell>
-                <TableCell align="right" sx={{ color: '#ff4d4d' }}>{row.deductions?.healthInsurance?.toLocaleString() || '-'}원</TableCell>
-                <TableCell align="right" sx={{ color: '#ff4d4d' }}>{row.deductions?.longTermCare?.toLocaleString() || '-'}원</TableCell>
-                <TableCell align="right" sx={{ color: '#ff4d4d' }}>{row.deductions?.employmentInsurance?.toLocaleString() || '-'}원</TableCell>
-                <TableCell align="right" sx={{ color: '#ff4d4d' }}>{row.taxes?.incomeTax?.toLocaleString() || '-'}원</TableCell>
-                <TableCell align="right" sx={{ color: '#4d7cfe', fontWeight: 600, padding: '16px', fontSize: '0.95rem' }}>{row.netPay?.toLocaleString() || '-'}원</TableCell>
+                <TableCell align="right" sx={{ color: '#4d7cfe', padding: '16px', fontSize: '0.95rem' }}>{row.base_pay?.toLocaleString() || row.basePay?.toLocaleString() || '-'}원</TableCell>
+                <TableCell align="right" sx={{ color: '#4d7cfe', padding: '16px', fontSize: '0.95rem' }}>{row.overtime_pay?.toLocaleString() || row.overtimePay?.toLocaleString() || '-'}원</TableCell>
+                <TableCell align="right" sx={{ color: '#4d7cfe', padding: '16px', fontSize: '0.95rem' }}>{row.night_shift_pay?.toLocaleString() || row.nightPay?.toLocaleString() || '-'}원</TableCell>
+                <TableCell align="right" sx={{ color: '#4d7cfe', padding: '16px', fontSize: '0.95rem' }}>{row.holiday_pay?.toLocaleString() || row.holidayPay?.toLocaleString() || '-'}원</TableCell>
+                <TableCell align="right" sx={{ color: '#ff4d4d' }}>{row.national_pension?.toLocaleString() || (row.deductions?.nationalPension?.toLocaleString()) || '-'}원</TableCell>
+                <TableCell align="right" sx={{ color: '#ff4d4d' }}>{row.health_insurance?.toLocaleString() || (row.deductions?.healthInsurance?.toLocaleString()) || '-'}원</TableCell>
+                <TableCell align="right" sx={{ color: '#ff4d4d' }}>{row.long_term_care?.toLocaleString() || (row.deductions?.longTermCare?.toLocaleString()) || '-'}원</TableCell>
+                <TableCell align="right" sx={{ color: '#ff4d4d' }}>{row.employment_insurance?.toLocaleString() || (row.deductions?.employmentInsurance?.toLocaleString()) || '-'}원</TableCell>
+                <TableCell align="right" sx={{ color: '#ff4d4d' }}>{row.income_tax?.toLocaleString() || (row.taxes?.incomeTax?.toLocaleString()) || '-'}원</TableCell>
+                <TableCell align="right" sx={{ color: '#4d7cfe', fontWeight: 600, padding: '16px', fontSize: '0.95rem' }}>{row.net_pay?.toLocaleString() || row.netPay?.toLocaleString() || '-'}원</TableCell>
                 <TableCell align="center">
                   {row.status === 'confirmed' ? (
                     <Chip

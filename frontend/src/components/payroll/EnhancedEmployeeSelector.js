@@ -13,6 +13,15 @@ import PeopleIcon from '@mui/icons-material/People';
 import CategoryIcon from '@mui/icons-material/Category';
 import { StyledPaper } from '../../components/StyledComponents';
 
+// 스타일 설정 - 항상 스크롤바 표시
+const globalStyles = {
+  '@global': {
+    body: {
+      overflowY: 'scroll', // 항상 스크롤바 표시
+    }
+  }
+};
+
 const EnhancedEmployeeSelector = ({ selectedEmployees, onSelectionChange, employees }) => {
   const [searchTerm, setSearchTerm] = useState('');
   const [departmentFilters, setDepartmentFilters] = useState({});
@@ -23,6 +32,7 @@ const EnhancedEmployeeSelector = ({ selectedEmployees, onSelectionChange, employ
     total: 0,
     byDepartment: {}
   });
+  const [selectAllFilteredEmployees, setSelectAllFilteredEmployees] = useState(false);
 
   // 부서 필터 초기화
   useEffect(() => {
@@ -58,7 +68,22 @@ const EnhancedEmployeeSelector = ({ selectedEmployees, onSelectionChange, employ
     }
     
     setFilteredEmployees(filtered);
-  }, [employees, searchTerm, selectedDepartment]);
+    
+    // 전체 선택 상태 업데이트
+    updateSelectAllState(filtered, selectedEmployees);
+  }, [employees, searchTerm, selectedDepartment, selectedEmployees]);
+
+  // 전체 선택 상태 업데이트
+  const updateSelectAllState = (filtered, selected) => {
+    if (filtered.length === 0) {
+      setSelectAllFilteredEmployees(false);
+      return;
+    }
+    
+    const allFilteredIds = filtered.map(emp => emp.employee_id);
+    const allSelected = allFilteredIds.every(id => selected.includes(id));
+    setSelectAllFilteredEmployees(allSelected);
+  };
 
   // 선택된 직원 통계 계산
   useEffect(() => {
@@ -116,6 +141,24 @@ const EnhancedEmployeeSelector = ({ selectedEmployees, onSelectionChange, employ
       onSelectionChange(allIds);
     } else {
       onSelectionChange([]);
+    }
+  };
+
+  // 필터링된 직원 전체 선택/해제 핸들러
+  const handleSelectAllFiltered = (event) => {
+    const { checked } = event.target;
+    setSelectAllFilteredEmployees(checked);
+    
+    if (checked) {
+      // 현재 필터링된 직원 전체 선택
+      const filteredIds = filteredEmployees.map(emp => emp.employee_id);
+      const newSelection = [...new Set([...selectedEmployees, ...filteredIds])];
+      onSelectionChange(newSelection);
+    } else {
+      // 현재 필터링된 직원 전체 해제
+      const filteredIds = filteredEmployees.map(emp => emp.employee_id);
+      const newSelection = selectedEmployees.filter(id => !filteredIds.includes(id));
+      onSelectionChange(newSelection);
     }
   };
 
@@ -207,6 +250,29 @@ const EnhancedEmployeeSelector = ({ selectedEmployees, onSelectionChange, employ
           </Typography>
         </AccordionSummary>
         <AccordionDetails sx={{ p: 0 }}>
+          {/* 전체 선택 체크박스 */}
+          <Box sx={{ 
+            p: 1, 
+            borderBottom: '1px solid rgba(0, 0, 0, 0.12)',
+            backgroundColor: 'rgba(0, 0, 0, 0.03)'
+          }}>
+            <FormControlLabel
+              control={
+                <Checkbox
+                  checked={selectAllFilteredEmployees}
+                  onChange={handleSelectAllFiltered}
+                  size="small"
+                />
+              }
+              label={
+                <Typography variant="body2" sx={{ fontWeight: 500 }}>
+                  전체 선택
+                </Typography>
+              }
+              sx={{ m: 0 }}
+            />
+          </Box>
+          
           <Box sx={{ 
             height: '250px', 
             overflowY: 'auto',
@@ -248,34 +314,27 @@ const EnhancedEmployeeSelector = ({ selectedEmployees, onSelectionChange, employ
           </Box>
         </AccordionDetails>
       </Accordion>
-      
-      {/* 선택 요약 정보 - 부서별 세부내용 제거됨 */}
-      <Box sx={{ mt: 0.5, p: 1, bgcolor: 'rgba(0, 0, 0, 0.05)', borderRadius: 1 }}>
-        <Typography variant="body2" color="text.secondary">
-          선택된 직원: {selectionStats.total}명
+
+      {/* 선택 정보 표시 */}
+      <Box sx={{ mt: 2, p: 1.5, bgcolor: 'rgba(0, 0, 0, 0.03)', borderRadius: 1 }}>
+        <Typography variant="subtitle2">
+          {selectionStats.total}명 선택됨
         </Typography>
-      </Box>
-      
-      {/* 빠른 선택 옵션
-      <Box sx={{ mt: 2 }}>
-        <Typography variant="subtitle2" gutterBottom>부서별 빠른 선택</Typography>
-        <Box sx={{ display: 'flex', flexWrap: 'wrap', gap: 0.5 }}>
-          {Array.from(new Set(employees.map(emp => emp.department))).map(dept => (
-            <Chip
-              key={dept}
-              label={dept}
-              onClick={() => handleDepartmentSelect(dept)}
-              variant="outlined"
-              size="small"
-              sx={{ 
-                fontSize: '0.75rem',
-                cursor: 'pointer',
-                '&:hover': { bgcolor: 'rgba(0, 0, 0, 0.08)' }
-              }}
-            />
+        
+        {/* 부서별 선택 현황 */}
+        <Box sx={{ mt: 1, display: 'flex', flexWrap: 'wrap', gap: 0.5 }}>
+          {Object.entries(selectionStats.byDepartment).map(([dept, count]) => (
+            count > 0 && (
+              <Chip 
+                key={dept} 
+                size="small" 
+                label={`${dept}: ${count}명`} 
+                variant="outlined"
+              />
+            )
           ))}
         </Box>
-      </Box> */}
+      </Box>
     </StyledPaper>
   );
 };

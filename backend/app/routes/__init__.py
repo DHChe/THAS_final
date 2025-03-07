@@ -1,7 +1,7 @@
 # backend/app/routes/__init__.py
 from .hr import hr_bp
 from .payroll import payroll_bp
-
+from .ai_analysis import ai_analysis_bp
 from app.routes.health import health_bp
 
 from flask import Flask
@@ -15,4 +15,13 @@ def create_app(config_class=Config):
     # Health check 블루프린트 등록
     app.register_blueprint(health_bp)
 
-    # ... 기존 코드 ...
+    # HR 블루프린트 등록
+    app.register_blueprint(hr_bp)
+
+    # Payroll 블루프린트 등록
+    app.register_blueprint(payroll_bp)
+
+    # AI 분석 블루프린트 등록
+    app.register_blueprint(ai_analysis_bp)
+
+    return app

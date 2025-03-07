@@ -130,6 +130,9 @@ class Payroll(Base):
     residence_tax = Column(BigInteger, nullable=False, default=0, comment="주민세")
     national_pension = Column(BigInteger, nullable=False, default=0, comment="국민연금")
     health_insurance = Column(BigInteger, nullable=False, default=0, comment="건강보험")
+    long_term_care = Column(
+        BigInteger, nullable=False, default=0, comment="장기요양보험"
+    )
     employment_insurance = Column(
         BigInteger, nullable=False, default=0, comment="고용보험"
     )
@@ -138,6 +141,9 @@ class Payroll(Base):
     )
     net_pay = Column(BigInteger, nullable=False, comment="실수령액")
     status = Column(String(20), nullable=False, default="draft", comment="상태")
+    payroll_type = Column(
+        String(20), nullable=False, default="regular", comment="급여유형"
+    )
     confirmed_at = Column(DateTime, nullable=True, comment="확정일시")
     confirmed_by = Column(String(50), nullable=True, comment="확정자")
     payment_method = Column(String(20), nullable=True, comment="지급방법")
@@ -205,3 +211,30 @@ class PayrollDocument(Base):
 
     def __repr__(self):
         return f"<PayrollDocument(id={self.id}, payroll_id={self.payroll_id}, type={self.document_type})>"
+
+
+class AttendanceAudit(Base):
+    """근태 기록 변경 이력 모델
+
+    근태 기록의 변경 이력을 저장합니다.
+    """
+
+    __tablename__ = "attendance_audit"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    employee_id = Column(String(20), nullable=False)
+    date = Column(Date, nullable=False)
+    field_name = Column(
+        String(50), nullable=False
+    )  # 변경된 필드명 (check_in, check_out 등)
+    old_value = Column(String(100), nullable=True)  # 변경 전 값
+    new_value = Column(String(100), nullable=True)  # 변경 후 값
+    change_type = Column(
+        String(10), nullable=False
+    )  # 'create', 'update', 'delete' 중 하나
+    changed_by = Column(String(50), nullable=True)  # 변경한 사용자 ID 또는 '시스템'
+    changed_at = Column(DateTime, default=datetime.now)
+    ip_address = Column(String(45), nullable=True)  # 변경 IP 주소 (옵션)
+
+    def __repr__(self):
+        return f"AttendanceAudit(id={self.id}, employee_id={self.employee_id}, date={self.date}, field={self.field_name})"

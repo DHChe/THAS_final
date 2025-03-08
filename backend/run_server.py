@@ -5,6 +5,9 @@ import os
 import json
 import logging
 from datetime import datetime
+import sys
+from flask_socketio import SocketIO, emit
+import threading
 
 # 로깅 설정
 logging.basicConfig(
@@ -30,7 +33,7 @@ from models.models import (
 )
 
 # 새로 추가: 급여 서비스 임포트
-from app.services.payroll_service import PayrollService
+from app.services.payroll_service import PayrollService, FILE_CHANGED_EVENT
 from config import Config
 
 # PayrollService 객체 초기화
@@ -43,6 +46,18 @@ CORS(
         r"/api/*": {"origins": ["http://localhost:3001", "http://localhost:3000"]}
     },
 )
+# SocketIO 초기화
+socketio = SocketIO(
+    app,
+    cors_allowed_origins=["http://localhost:3001", "http://localhost:3000"],
+    async_mode="threading",  # 쓰레딩 모드 사용
+    ping_timeout=30,  # 핑 타임아웃 시간 증가
+    ping_interval=15,  # 핑 간격 조정
+    logger=True,  # 로깅 활성화
+    engineio_logger=True,  # Engine.IO 로깅 활성화
+    always_connect=True,  # 항상 연결 시도
+    max_http_buffer_size=10e6,  # 버퍼 크기 증가
+)
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 EMPLOYEES_CSV = os.path.join(BASE_DIR, "data", "employees.csv")
@@ -54,6 +69,98 @@ PAYROLL_DAY = 25  # *** 급여 지급일 설정 (변경 시 이 값을 수정하
 # 새로 추가: 급여 명세서 저장 디렉토리 설정
 PAYSLIPS_DIR = os.path.join(BASE_DIR, "data", "payslips")
 os.makedirs(PAYSLIPS_DIR, exist_ok=True)
+
+# WebSocket 연결 클라이언트 수
+connected_clients = 0
+
+
+# 파일 변경 감지 시 WebSocket 이벤트 발송 함수
+def handle_file_change():
+    """근태 파일 변경 시 WebSocket 이벤트 발송"""
+    logger.info("근태 파일 변경 감지됨 - WebSocket 이벤트 발송")
+    socketio.emit(
+        "attendance_changed",
+        {
+            "message": "근태 데이터가 변경되었습니다. 최신 데이터로 갱신하세요.",
+            "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        },
+    )
+
+
+# 파일 변경 이벤트 감시 스레드
+def watch_file_change_event():
+    """파일 변경 이벤트를 감시하고 WebSocket 알림 전송"""
+    logger.info("파일 변경 이벤트 감시 스레드 시작")
+    while True:
+        # 이벤트가 설정될 때까지 대기
+        FILE_CHANGED_EVENT.wait()
+        # 이벤트가 발생하면 WebSocket 메시지 발송
+        handle_file_change()
+
+
+# 서버 초기화 시 이벤트 감시 스레드 시작
+file_watcher_thread = threading.Thread(
+    target=watch_file_change_event, daemon=True, name="FileChangeEventWatcher"
+)
+file_watcher_thread.start()
+
+# 변경 감지 핸들러 등록
+payroll_service.register_change_handler(handle_file_change)
+
+
+# Socket.IO 이벤트 핸들러
+@socketio.on("connect")
+def handle_connect():
+    """클라이언트 연결 이벤트 처리"""
+    global connected_clients
+    connected_clients += 1
+    logger.info(f"클라이언트 연결됨: 현재 {connected_clients}명 접속 중")
+
+
+@socketio.on("disconnect")
+def handle_disconnect():
+    """클라이언트 연결 해제 이벤트 처리"""
+    global connected_clients
+    connected_clients -= 1
+    logger.info(f"클라이언트 연결 해제: 현재 {connected_clients}명 접속 중")
+
+
+@socketio.on("check_attendance_changes")
+def handle_check_changes():
+    """클라이언트의 근태 변경 확인 요청 처리"""
+    try:
+        is_changed = payroll_service.check_attendance_file_changed()
+        if is_changed:
+            # 변경 감지 시 데이터베이스 동기화
+            payroll_service.sync_attendance_if_changed()
+            # 요청한 클라이언트에게만 응답
+            emit(
+                "attendance_check_result",
+                {
+                    "changes_detected": True,
+                    "message": "근태 데이터가 변경되었습니다. 최신 데이터로 갱신합니다.",
+                    "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                },
+            )
+        else:
+            emit(
+                "attendance_check_result",
+                {
+                    "changes_detected": False,
+                    "message": "근태 데이터에 변경이 없습니다.",
+                    "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                },
+            )
+    except Exception as e:
+        logger.error(f"근태 변경 확인 오류: {str(e)}")
+        emit(
+            "attendance_check_result",
+            {
+                "error": True,
+                "message": f"근태 변경 확인 중 오류 발생: {str(e)}",
+                "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+            },
+        )
 
 
 # 수정: CSV 파일에서 직원 데이터 로드하는 함수
@@ -871,10 +978,68 @@ def sync_attendance_csv():
                 f"CSV에서 {records_added}개의 근태 기록이 DB에 성공적으로 추가되었습니다."
             )
 
-            # 추가: 근태 파일 마지막 수정 시간 갱신
-            payroll_service.attendance_file_last_modified = (
-                payroll_service._get_attendance_file_modified_time()
-            )
+            # 변경된 데이터가 있으면 CSV 파일도 업데이트
+            total_changes = records_added
+            if total_changes > 0:
+                try:
+                    print("\n근태 기록 변경 후 CSV 파일 자동 동기화 시작...")
+
+                    # 새로 추가: sync_attendance_db_to_csv 함수 사용
+                    # 현재 디렉토리 경로 추가
+                    script_dir = os.path.dirname(os.path.abspath(__file__))
+                    if script_dir not in sys.path:
+                        sys.path.append(script_dir)
+
+                    # sync_attendance_db_to_csv 함수 임포트
+                    from sync_attendance_db_to_csv import sync_db_to_csv
+
+                    # 데이터베이스 내용을 CSV 파일로 동기화
+                    sync_result = sync_db_to_csv()
+
+                    if sync_result:
+                        print("근태 기록 변경과 CSV 파일 동기화가 모두 완료되었습니다.")
+                    else:
+                        # 동기화 실패 시 기존 방식으로 백업
+                        print("동기화 실패, 기존 방식으로 CSV 파일 업데이트 시도...")
+
+                        # 모든 근태 데이터 조회
+                        all_attendance = session.query(Attendance).all()
+
+                        # 데이터프레임으로 변환
+                        attendance_data = []
+                        for record in all_attendance:
+                            attendance_data.append(
+                                {
+                                    "employee_id": record.employee_id,
+                                    "date": (
+                                        record.date.strftime("%Y-%m-%d")
+                                        if hasattr(record.date, "strftime")
+                                        else str(record.date)
+                                    ),
+                                    "check_in": record.check_in or "",
+                                    "check_out": record.check_out or "",
+                                    "attendance_type": record.attendance_type or "정상",
+                                    "remarks": record.remarks or "",
+                                }
+                            )
+
+                        # 데이터프레임 생성 및 CSV 파일로 저장
+                        df = pd.DataFrame(attendance_data)
+                        df.to_csv(
+                            ATTENDANCE_CSV, index=False, encoding="euc-kr"
+                        )  # 인코딩을 euc-kr로 변경
+                        print(
+                            f"기존 방식으로 CSV 파일이 업데이트되었습니다: {ATTENDANCE_CSV}"
+                        )
+
+                    # 파일 수정 시간 갱신
+                    payroll_service.attendance_file_last_modified = (
+                        payroll_service._get_attendance_file_modified_time()
+                    )
+
+                except Exception as csv_error:
+                    print(f"근태 CSV 파일 업데이트 중 오류 발생: {csv_error}")
+                    # CSV 오류는 API 응답에 영향을 주지 않음
 
             return jsonify(
                 {
@@ -906,6 +1071,7 @@ def update_attendance():
 
     frontend에서 수정된 근태 데이터를 받아 데이터베이스에 반영합니다.
     변경된 내용만 선택적으로 업데이트하고, 변경 이력을 기록합니다.
+    데이터베이스 업데이트 후 CSV 파일도 자동으로 동기화합니다.
     """
     try:
         data = request.json
@@ -1015,9 +1181,7 @@ def update_attendance():
                         # 데이터 업데이트
                         attendance.attendance_type = record["attendance_type"]
 
-                    if "remarks" in record and attendance.remarks != record.get(
-                        "remarks", ""
-                    ):
+                    if "remarks" in record and attendance.remarks != record["remarks"]:
                         # 변경 이력 기록
                         audit_records.append(
                             AttendanceAudit(
@@ -1025,18 +1189,16 @@ def update_attendance():
                                 date=date_obj,
                                 field_name="remarks",
                                 old_value=attendance.remarks,
-                                new_value=record.get("remarks", ""),
+                                new_value=record["remarks"],
                                 change_type="update",
                                 changed_by=user_id,
                                 ip_address=ip_address,
                             )
                         )
                         # 데이터 업데이트
-                        attendance.remarks = record.get("remarks", "")
+                        attendance.remarks = record["remarks"]
 
-                    if len(audit_records) > 0:
-                        attendance.updated_at = datetime.now()
-                        updated_count += 1
+                    updated_count += 1
                 else:
                     # 기존 기록이 없으면 새로 생성
                     new_attendance = Attendance(
@@ -1048,67 +1210,98 @@ def update_attendance():
                         remarks=record.get("remarks", ""),
                     )
                     session.add(new_attendance)
-                    created_count += 1
 
-                    # 신규 생성 이력 기록
+                    # 변경 이력 기록
                     audit_records.append(
                         AttendanceAudit(
                             employee_id=employee_id,
                             date=date_obj,
                             field_name="record",
-                            old_value=None,
-                            new_value="새 근태 기록 생성",
+                            old_value="",
+                            new_value="신규 생성",
                             change_type="create",
                             changed_by=user_id,
                             ip_address=ip_address,
                         )
                     )
 
-            # 변경 이력 저장
-            for audit in audit_records:
-                session.add(audit)
+                    created_count += 1
 
-            # 변경사항 커밋
+            # 변경 이력 저장
+            if audit_records:
+                session.add_all(audit_records)
+
+            # 데이터베이스 커밋
             session.commit()
 
             # 변경된 데이터가 있으면 CSV 파일도 업데이트
             total_changes = updated_count + created_count
             if total_changes > 0:
                 try:
-                    # 모든 근태 데이터 조회
-                    all_attendance = session.query(Attendance).all()
+                    # 현재 파일의 디렉토리 경로 추가
+                    script_dir = os.path.dirname(os.path.abspath(__file__))
+                    if script_dir not in sys.path:
+                        sys.path.append(script_dir)
 
-                    # 데이터프레임으로 변환
-                    attendance_data = []
-                    for record in all_attendance:
-                        attendance_data.append(
-                            {
-                                "employee_id": record.employee_id,
-                                "date": (
-                                    record.date.strftime("%Y-%m-%d")
-                                    if hasattr(record.date, "strftime")
-                                    else str(record.date)
-                                ),
-                                "check_in": record.check_in or "",
-                                "check_out": record.check_out or "",
-                                "attendance_type": record.attendance_type or "정상",
-                                "remarks": record.remarks or "",
-                            }
-                        )
+                    # 자동 동기화 함수 임포트 및 실행
+                    print("\n근태 기록 변경 후 CSV 파일 자동 동기화 시작...")
 
-                    # 데이터프레임 생성 및 CSV 파일로 저장
-                    df = pd.DataFrame(attendance_data)
-                    df.to_csv(ATTENDANCE_CSV, index=False, encoding="utf-8")
+                    # 파일 시스템 경로가 아닌 모듈 경로로 임포트
+                    from sync_attendance_db_to_csv import sync_db_to_csv
+
+                    sync_result = sync_db_to_csv()
+
+                    if sync_result:
+                        print("근태 기록 변경과 CSV 파일 동기화가 모두 완료되었습니다.")
+                    else:
+                        print("CSV 파일 동기화 실패: 백업 방법 시도")
+
+                        # CSV 동기화 실패 시 기존 방식으로도 시도
+                        all_attendance = session.query(Attendance).all()
+                        attendance_data = []
+
+                        for record in all_attendance:
+                            attendance_data.append(
+                                {
+                                    "employee_id": record.employee_id,
+                                    "date": (
+                                        record.date.strftime("%Y-%m-%d")
+                                        if hasattr(record.date, "strftime")
+                                        else str(record.date)
+                                    ),
+                                    "check_in": record.check_in or "",
+                                    "check_out": record.check_out or "",
+                                    "attendance_type": record.attendance_type or "정상",
+                                    "remarks": record.remarks or "",
+                                }
+                            )
+
+                        # CSV 파일 저장 - euc-kr 인코딩 사용
+                        import csv
+
+                        with open(
+                            ATTENDANCE_CSV, "w", newline="", encoding="euc-kr"
+                        ) as f:
+                            writer = csv.DictWriter(
+                                f,
+                                fieldnames=[
+                                    "employee_id",
+                                    "date",
+                                    "check_in",
+                                    "check_out",
+                                    "attendance_type",
+                                    "remarks",
+                                ],
+                            )
+                            writer.writeheader()
+                            writer.writerows(attendance_data)
 
                     # 파일 수정 시간 갱신
                     payroll_service.attendance_file_last_modified = (
                         payroll_service._get_attendance_file_modified_time()
                     )
-                    print(
-                        f"근태 데이터베이스 변경사항이 CSV 파일에 저장되었습니다: {ATTENDANCE_CSV}"
-                    )
                 except Exception as csv_error:
-                    print(f"근태 CSV 파일 업데이트 중 오류 발생: {csv_error}")
+                    print(f"근태 CSV 파일 업데이트 중 오류 발생: {str(csv_error)}")
                     # CSV 오류는 API 응답에 영향을 주지 않음
 
             return jsonify(
@@ -1118,6 +1311,7 @@ def update_attendance():
                     "updated_count": updated_count,
                     "created_count": created_count,
                     "audit_count": len(audit_records),
+                    "csv_sync": "success",
                 }
             )
 
@@ -1766,19 +1960,39 @@ def get_attendance_audit():
         return jsonify({"error": f"요청 처리 중 오류가 발생했습니다: {str(e)}"}), 500
 
 
-# 새로 추가: 애플리케이션 초기화 함수
-def init_application():
-    """애플리케이션 시작 시 초기화 작업 수행"""
+# 새로운 initialize_app 함수 추가
+def initialize_app():
+    """애플리케이션 초기화 함수"""
     try:
         # 데이터베이스 초기화
         init_db()
-        print("데이터베이스 테이블이 초기화되었습니다.")
+
+        # 근태 파일 변경 확인 및 동기화
+        if payroll_service.check_attendance_file_changed():
+            logger.info(
+                "서버 시작 시 근태 파일 변경이 감지되어 자동 동기화를 시도합니다."
+            )
+            payroll_service.sync_attendance_if_changed()
     except Exception as e:
-        print(f"데이터베이스 초기화 오류: {e}")
+        logger.error(f"서버 초기화 중 오류 발생: {str(e)}")
 
 
-# 애플리케이션 시작 시 초기화 수행
-init_application()
-
+# 그리고 main 부분 수정
 if __name__ == "__main__":
-    app.run(debug=True, host="0.0.0.0", port=5000)
+    try:
+        # 서버 시작 전 필요한 디렉토리 생성
+        os.makedirs(os.path.join(BASE_DIR, "logs"), exist_ok=True)
+        os.makedirs(os.path.join(BASE_DIR, "data"), exist_ok=True)
+
+        # 데이터베이스 초기화
+        init_db()
+        logger.info("데이터베이스 초기화 완료")
+
+        # 애플리케이션 초기화 실행
+        initialize_app()  # <-- 이 줄 추가
+
+        # SocketIO를 통한 서버 실행
+        logger.info("급여 계산 서버를 시작합니다...")
+        socketio.run(app, host="0.0.0.0", port=5000, debug=True)
+    except Exception as e:
+        logger.error(f"서버 시작 오류: {str(e)}")

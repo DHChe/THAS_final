@@ -11,10 +11,20 @@ REGULAR_WORKDAY_END = 18  # 일반 근로일 근무 종료 시간 (18:00)
 
 
 class PayCalculator:
-    def __init__(self):
+    def __init__(
+        self,
+        employee=None,
+        attendance_records=None,
+        period_start_date=None,
+        period_end_date=None,
+    ):
         # 월 소정 근로시간: 8시간 × 6일 × 365일 ÷ 12개월 ÷ 7일 = 약 209시간
         self.WORK_HOURS_PER_MONTH = 209
         self.kr_holidays = holidays.KR()
+        self.employee = employee
+        self.attendance_records = attendance_records
+        self.period_start_date = period_start_date
+        self.period_end_date = period_end_date
 
     def is_full_month(self, start_date, end_date):
         """
@@ -490,44 +500,72 @@ class PayCalculator:
 
         return int(total_holiday_pay)
 
-    def get_total_pay(
-        self,
-        base_salary,
-        start_date,
-        end_date,
-        attendance_data,
-        join_date=None,
-        resignation_date=None,
-    ):
+    def calculate_total_pay(self):
         """
-        총 급여 계산 함수
+        직원의 총 급여를 계산하는 함수
 
-        기본급 + 연장근로수당 + 야간근로수당 + 휴일근로수당
+        Returns:
+            dict: 급여 계산 결과를 포함하는 딕셔너리
         """
         try:
-            hourly_rate = (base_salary / 12) / self.WORK_HOURS_PER_MONTH
+            if not self.employee or not self.attendance_records:
+                raise ValueError("직원 정보와 근태 기록이 필요합니다.")
+
+            # 급여 기간 문자열로 변환
+            start_date = self.period_start_date.strftime("%Y-%m-%d")
+            end_date = self.period_end_date.strftime("%Y-%m-%d")
+
+            # 시급 계산
+            hourly_rate = (self.employee.base_salary / 12) / self.WORK_HOURS_PER_MONTH
+
+            # 기본급 계산
             base_pay = self.calculate_base_pay(
-                base_salary,
+                self.employee.base_salary,
                 start_date,
                 end_date,
-                attendance_data,
-                join_date,
-                resignation_date,
+                self.attendance_records,
+                (
+                    self.employee.join_date.strftime("%Y-%m-%d")
+                    if self.employee.join_date
+                    else None
+                ),
+                (
+                    self.employee.resignation_date.strftime("%Y-%m-%d")
+                    if self.employee.resignation_date
+                    else None
+                ),
             )
-            overtime_pay = self.calculate_overtime_pay(attendance_data, hourly_rate)
-            night_pay = self.calculate_night_pay(attendance_data, hourly_rate)
-            holiday_pay = self.calculate_holiday_pay(attendance_data, hourly_rate)
 
-            # 디버깅을 위한 정보 출력
-            print(f"Base Pay: {base_pay}")
-            print(f"Overtime Pay: {overtime_pay}")
-            print(f"Night Pay: {night_pay}")
-            print(f"Holiday Pay: {holiday_pay}")
+            # 추가 수당 계산
+            overtime_pay = self.calculate_overtime_pay(
+                self.attendance_records, hourly_rate
+            )
+            night_pay = self.calculate_night_pay(self.attendance_records, hourly_rate)
+            holiday_pay = self.calculate_holiday_pay(
+                self.attendance_records, hourly_rate
+            )
+
+            # 직급 수당 계산 (직급에 따라 다른 수당 적용)
+            position_allowance = 0
+            if self.employee.position == "부장":
+                position_allowance = 500000
+            elif self.employee.position == "과장":
+                position_allowance = 300000
+            elif self.employee.position == "대리":
+                position_allowance = 200000
+            elif self.employee.position == "주임":
+                position_allowance = 100000
 
             # 총 지급액 계산
-            total_pay = base_pay + overtime_pay + night_pay + holiday_pay
-            return total_pay
+            total_pay = base_pay + overtime_pay + holiday_pay + position_allowance
+
+            return {
+                "base_pay": base_pay,
+                "overtime_pay": overtime_pay,
+                "holiday_pay": holiday_pay,
+                "position_allowance": position_allowance,
+                "total_pay": total_pay,
+            }
         except Exception as e:
-            print(f"Error in get_total_pay: {str(e)}")
-            # 오류 발생 시 기본 월급으로 대체 (실제 환경에서는 적절한 오류 처리 필요)
-            return base_salary / 12
+            print(f"급여 계산 중 오류 발생: {str(e)}")
+            raise e

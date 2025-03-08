@@ -121,9 +121,41 @@ def migrate_attendance():
         print(f"오류: 파일이 존재하지 않습니다: {csv_path}")
         return
 
-    # CSV 데이터 로드
-    df = pd.read_csv(csv_path)
+    # 다양한 인코딩 시도
+    encodings = ["utf-8", "cp949", "euc-kr", "latin1", "utf-16", "utf-16le", "utf-16be"]
+    df = None
+
+    for encoding in encodings:
+        try:
+            print(f"{encoding} 인코딩으로 파일 읽기 시도...")
+            df = pd.read_csv(csv_path, encoding=encoding)
+            print(f"{encoding} 인코딩으로 성공적으로 파일을 읽었습니다!")
+            # 열 이름이 정상적인지 확인
+            if "employee_id" in df.columns:
+                print("CSV 파일이 올바른 형식입니다.")
+                break
+            else:
+                print(
+                    f"CSV 파일 형식이 맞지 않습니다. 다른 인코딩을 시도합니다. 현재 열: {df.columns}"
+                )
+                df = None
+        except Exception as e:
+            print(f"{encoding} 인코딩으로 파일을 읽을 수 없습니다: {str(e)}")
+
+    if df is None:
+        print("어떤 인코딩으로도 올바른 형식의 파일을 읽을 수 없습니다.")
+        return
+
     print(f"총 {len(df)}개의 근태 기록을 읽어왔습니다.")
+
+    # CSV 파일의 열 구조 확인
+    print("CSV 파일 열 목록:")
+    for col in df.columns:
+        print(f"  - {col}")
+
+    # 첫 몇 개의 행 출력
+    print("\n첫 5개 행 데이터:")
+    print(df.head())
 
     # 데이터베이스 세션 가져오기
     session = get_db_session()
@@ -133,6 +165,11 @@ def migrate_attendance():
         valid_employee_ids = [
             emp[0] for emp in session.query(Employee.employee_id).all()
         ]
+
+        # 기존 근태 데이터를 모두 삭제 (중복 데이터 방지)
+        print("기존 근태 데이터를 삭제하고 새로운 데이터로 업데이트합니다...")
+        session.query(Attendance).delete()
+        session.commit()
 
         count = 0
         for _, row in df.iterrows():

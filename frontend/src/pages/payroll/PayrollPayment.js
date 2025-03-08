@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useMemo } from 'react';
+import React, { useState, useEffect, useMemo, useCallback } from 'react';
 import {
   Box,
   Container,
@@ -65,6 +65,7 @@ import ReplayIcon from '@mui/icons-material/Replay';
 import SyncIcon from '@mui/icons-material/Sync';
 import RefreshIcon from '@mui/icons-material/Refresh';
 import HistoryIcon from '@mui/icons-material/History';
+import { io } from 'socket.io-client';
 
 // dayjs 플러그인 설정
 import isSameOrBefore from 'dayjs/plugin/isSameOrBefore';
@@ -74,6 +75,19 @@ import customParseFormat from 'dayjs/plugin/customParseFormat';
 dayjs.extend(isSameOrBefore);
 dayjs.extend(isSameOrAfter);
 dayjs.extend(customParseFormat);
+
+// 실시간 데이터 동기화를 위한 Socket.io 연결 설정
+// 더 안정적인 연결을 위해 옵션 추가
+const socket = io('http://localhost:5000', {
+  reconnectionAttempts: 30,         // 재연결 시도 횟수 증가
+  reconnectionDelay: 500,           // 재연결 지연 시간 감소
+  timeout: 30000,                   // 타임아웃 증가
+  transports: ['polling', 'websocket'], // polling을 먼저 시도하여 더 안정적인 연결
+  autoConnect: true,                // 자동 연결 활성화
+  forceNew: false,                  // 기존 연결 재사용 허용
+  reconnection: true,               // 재연결 시도 활성화
+  closeOnBeforeunload: false        // 페이지 새로고침 시 연결 유지
+});
 
 // 최대 종료일 계산 함수 - 수정됨
 const getMaxEndDate = (startDate) => {
@@ -334,6 +348,10 @@ const PayrollPayment = () => {
   const [attendanceAuditData, setAttendanceAuditData] = useState([]);
   const [auditDialogOpen, setAuditDialogOpen] = useState(false);
   const [auditLoading, setAuditLoading] = useState(false);
+  
+  // 실시간 업데이트 관련 상태
+  const [socketConnected, setSocketConnected] = useState(false);
+  const [lastUpdated, setLastUpdated] = useState(null);
 
   // 컴포넌트 마운트 시 기본값 설정
   useEffect(() => {
@@ -349,35 +367,213 @@ const PayrollPayment = () => {
     
     // 근태 파일 변경 여부 확인
     checkAttendanceFileChanges();
+    
+    // Socket.io 연결 설정
+    setupSocketConnection();
+    
+    // 주기적으로 근태 데이터 확인 (3분마다)
+    const intervalId = setInterval(() => {
+      console.log('정기 근태 데이터 확인 실행...');
+      if (!socketConnected) {
+        checkAttendanceFileChanges();
+      } else {
+        socket.emit('check_attendance_changes');
+      }
+    }, 180000); // 3분 = 180000ms
+    
+    // 컴포넌트 언마운트 시 소켓 연결 및 타이머 해제
+    return () => {
+      socket.disconnect();
+      clearInterval(intervalId);
+    };
   }, []);
 
-  useEffect(() => {
-    const fetchAttendance = async () => {
-      try {
-        const response = await fetch('http://localhost:5000/api/attendance');
-        if (!response.ok) throw new Error('근태 데이터 로드 실패');
-        const data = await response.json();
-        const formattedData = data.map(record => ({
-          ...record,
-          check_in: record.check_in || '',
-          check_out: record.check_out || '',
-          attendance_type: record.attendance_type || '정상',
-        })) || [];
-        
-        setAttendanceData(formattedData);
-        // 원본 데이터도 저장 (변경 감지용)
-        setOriginalAttendanceData(JSON.parse(JSON.stringify(formattedData)));
-      } catch (err) {
-        setAlert({ open: true, message: `근태 데이터 로드 오류: ${err.message}`, severity: 'error' });
+  // Socket.io 연결 설정 함수
+  const setupSocketConnection = () => {
+    // 기존 이벤트 리스너 제거하여 중복 등록 방지
+    socket.off('connect');
+    socket.off('disconnect');
+    socket.off('connect_error');
+    socket.off('reconnect_attempt');
+    socket.off('reconnect');
+    socket.off('attendance_changed');
+    socket.off('attendance_check_result');
+
+    // 연결 이벤트
+    socket.on('connect', () => {
+      console.log('Socket.io 서버에 연결되었습니다.');
+      console.log('Socket ID:', socket.id);
+      setSocketConnected(true);
+      
+      // 연결 직후 변경사항 확인 요청
+      socket.emit('check_attendance_changes');
+    });
+    
+    // 연결 해제 이벤트
+    socket.on('disconnect', (reason) => {
+      console.log('Socket.io 서버와 연결이 끊어졌습니다. 사유:', reason);
+      setSocketConnected(false);
+      
+      // 연결 끊어진 후 수동으로 데이터 확인 시도
+      checkAttendanceFileChanges();
+      
+      // 일부 disconnect 사유는 자동 재연결되지 않음 - 수동 재연결 시도
+      if (reason === 'io server disconnect' || reason === 'transport close') {
+        console.log('서버에서 연결이 끊겼습니다. 수동으로 재연결을 시도합니다.');
+        // 1초 후 재연결 시도
+        setTimeout(() => {
+          console.log('Socket 재연결 시도 중...');
+          socket.connect();
+        }, 1000);
       }
-    };
-    fetchAttendance();
+    });
+    
+    // 연결 오류 이벤트 처리 추가
+    socket.on('connect_error', (error) => {
+      console.error('Socket.io 연결 오류:', error.message);
+      setSocketConnected(false);
+      
+      // 연결 실패 시 HTTP 방식으로 변경 확인
+      checkAttendanceFileChanges();
+      
+      // 오류 상세 정보 기록
+      console.log('연결 오류 세부 정보:', {
+        message: error.message,
+        type: error.type,
+        description: error.description,
+        stack: error.stack
+      });
+    });
+    
+    // 재연결 시도 이벤트
+    socket.on('reconnect_attempt', (attemptNumber) => {
+      console.log(`Socket.io 재연결 시도 (${attemptNumber}번째)`);
+    });
+    
+    // 재연결 성공 이벤트
+    socket.on('reconnect', (attemptNumber) => {
+      console.log(`Socket.io 재연결 성공 (${attemptNumber}번의 시도 후)`);
+      setSocketConnected(true);
+      
+      // 재연결 후 변경사항 확인 요청
+      socket.emit('check_attendance_changes');
+    });
+    
+    // 근태 데이터 변경 이벤트 수신
+    socket.on('attendance_changed', (data) => {
+      console.log('근태 데이터 변경 감지:', data);
+      
+      // 알림 표시
+      setAlert({
+        open: true,
+        message: data.message,
+        severity: 'info'
+      });
+      
+      // 마지막 업데이트 시간 기록
+      setLastUpdated(data.timestamp);
+      
+      // 근태 데이터 자동 갱신
+      fetchAttendance();
+      
+      // 변경 플래그 초기화
+      setAttendanceFileChanged(false);
+    });
+    
+    // 근태 데이터 확인 결과 이벤트 수신
+    socket.on('attendance_check_result', (data) => {
+      console.log('근태 데이터 확인 결과:', data);
+      
+      if (data.changes_detected) {
+        // 변경 감지 시 데이터 갱신
+        fetchAttendance();
+        
+        // 알림 표시
+        setAlert({
+          open: true,
+          message: data.message,
+          severity: 'info'
+        });
+        
+        // 마지막 업데이트 시간 기록
+        setLastUpdated(data.timestamp);
+        
+        // 변경 플래그 설정
+        setAttendanceFileChanged(true);
+      }
+    });
+    
+    // 연결 직후 한 번 더 connect 시도 - 가끔 연결이 제대로 안 되는 경우 해결
+    // 최초 연결 시도가 실패한 경우를 대비
+    if (!socket.connected) {
+      console.log('초기 소켓 연결 확인 - 연결 시도 중...');
+      socket.connect();
+    }
+  };
+
+  // 근태 데이터 로드 함수 개선
+  const fetchAttendance = useCallback(async () => {
+    try {
+      setIsLoading(true);
+      
+      // 캐시를 완전히 방지하기 위해 타임스탬프 추가
+      const timestamp = new Date().getTime();
+      const response = await fetch(`http://localhost:5000/api/attendance?nocache=${timestamp}`, {
+        cache: 'no-store',  // 캐시 사용 안함
+        headers: {
+          'Cache-Control': 'no-cache, no-store, must-revalidate',
+          'Pragma': 'no-cache',
+          'Expires': '0'
+        }
+      });
+      
+      if (!response.ok) throw new Error('근태 데이터 로드 실패');
+      
+      const data = await response.json();
+      const formattedData = data.map(record => ({
+        ...record,
+        check_in: record.check_in || '',
+        check_out: record.check_out || '',
+        attendance_type: record.attendance_type || '정상',
+      })) || [];
+      
+      // 데이터 로깅 추가
+      console.log('로드된 근태 데이터 (첫 5개):', formattedData.slice(0, 5));
+      
+      setAttendanceData(formattedData);
+      // 원본 데이터도 저장 (변경 감지용)
+      setOriginalAttendanceData(JSON.parse(JSON.stringify(formattedData)));
+      
+      // 마지막 업데이트 시간 기록
+      const updateTime = new Date().toLocaleString();
+      setLastUpdated(updateTime);
+      
+      console.log(`${formattedData.length}개의 근태 기록을 로드했습니다. (${updateTime})`);
+    } catch (err) {
+      console.error('근태 데이터 로드 오류:', err);
+      setAlert({ open: true, message: `근태 데이터 로드 오류: ${err.message}`, severity: 'error' });
+    } finally {
+      setIsLoading(false);
+    }
   }, []);
+  
+  // 컴포넌트 마운트 시 근태 데이터 로드
+  useEffect(() => {
+    fetchAttendance();
+  }, [fetchAttendance]);
 
   // 근태 파일 변경 확인 함수
   const checkAttendanceFileChanges = async () => {
     try {
-      const response = await fetch('http://localhost:5000/api/attendance/check-changes');
+      setIsLoading(true);
+      const response = await fetch('http://localhost:5000/api/attendance/check-changes', {
+        cache: 'no-store',  // 캐시 사용 안함
+        headers: {
+          'Cache-Control': 'no-cache',
+          'Pragma': 'no-cache'
+        }
+      });
+      
       if (!response.ok) {
         throw new Error('근태 파일 변경 확인 실패');
       }
@@ -393,29 +589,65 @@ const PayrollPayment = () => {
           message: '근태 파일이 변경되었습니다. 급여 계산 시 최신 데이터가 반영됩니다.',
           severity: 'info'
         });
+        
+        // 변경된 근태 데이터 로드
+        fetchAttendance();
       }
+      
+      return data.changes_detected;
     } catch (err) {
       console.error('근태 파일 변경 확인 오류:', err);
+      setAlert({
+        open: true,
+        message: `근태 파일 변경 확인 오류: ${err.message}`,
+        severity: 'error'
+      });
+      return false;
+    } finally {
+      setIsLoading(false);
     }
   };
   
-  // 근태 파일 수동 동기화 함수
+  // 근태 파일 수동 동기화 함수 개선
   const syncAttendanceFile = async () => {
     try {
       setIsLoading(true);
-      const response = await fetch('http://localhost:5000/api/attendance/sync-file', {
+      
+      // 1단계: 먼저 일반 동기화 시도
+      let response = await fetch('http://localhost:5000/api/attendance/sync-file', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' }
+        headers: { 
+          'Content-Type': 'application/json',
+          'Cache-Control': 'no-cache',
+          'Pragma': 'no-cache'
+        },
+        cache: 'no-store'
       });
       
       if (!response.ok) {
-        const errorData = await response.json();
-        throw new Error(errorData.error || '근태 파일 동기화 실패');
+        // 2단계: 일반 동기화 실패 시 강제 CSV 동기화 시도
+        console.log('첫 번째 동기화 시도 실패, CSV 강제 동기화 시도...');
+        response = await fetch('http://localhost:5000/api/attendance/sync-csv', {
+          method: 'POST',
+          headers: { 
+            'Content-Type': 'application/json',
+            'Cache-Control': 'no-cache',
+            'Pragma': 'no-cache'
+          },
+          body: JSON.stringify({ force: true }),
+          cache: 'no-store'
+        });
+        
+        if (!response.ok) {
+          const errorData = await response.json();
+          throw new Error(errorData.error || '근태 파일 동기화 실패');
+        }
       }
       
       const result = await response.json();
       
-      // 동기화 후 근태 데이터 다시 로드
+      // 3단계: 동기화 후 근태 데이터 강제 재로드
+      console.log('동기화 성공, 근태 데이터 강제 재로드...');
       await fetchAttendance();
       
       setAttendanceFileChanged(false);
@@ -423,14 +655,56 @@ const PayrollPayment = () => {
       
       setAlert({
         open: true,
-        message: result.message,
+        message: result.message || "근태 파일이 성공적으로 동기화되었습니다. 다시 급여 계산을 시도해보세요.",
         severity: 'success'
       });
+      
+      // 성공 시 true 반환
+      return true;
     } catch (err) {
       console.error('근태 파일 동기화 오류:', err);
       setAlert({
         open: true,
-        message: `근태 파일 동기화 오류: ${err.message}`,
+        message: `근태 파일 동기화 오류: ${err.message}. 백엔드 서버가 실행 중인지 확인하세요.`,
+        severity: 'error'
+      });
+      // 실패 시 false 반환
+      return false;
+    } finally {
+      setIsLoading(false);
+    }
+  };
+
+  // 수동으로 근태 변경 확인 요청 함수
+  const manualCheckChanges = async () => {
+    setIsLoading(true);
+    setAlert({
+      open: true,
+      message: '근태 데이터 변경 확인 중...',
+      severity: 'info'
+    });
+    
+    try {
+      if (socketConnected) {
+        socket.emit('check_attendance_changes');
+      } else {
+        // 소켓 연결이 없으면 HTTP 방식으로 확인
+        const changesDetected = await checkAttendanceFileChanges();
+        
+        if (!changesDetected) {
+          // 변경사항이 없으면 알림
+          setAlert({
+            open: true,
+            message: '근태 데이터 변경사항이 없습니다. DB와 CSV 파일이 이미 동기화되어 있습니다.',
+            severity: 'info'
+          });
+        }
+      }
+    } catch (err) {
+      console.error('근태 데이터 변경 확인 오류:', err);
+      setAlert({
+        open: true,
+        message: `근태 데이터 변경 확인 오류: ${err.message}`,
         severity: 'error'
       });
     } finally {
@@ -438,108 +712,6 @@ const PayrollPayment = () => {
     }
   };
 
-  // 근태 데이터 변경 감지 및 추적 함수
-  const updateAttendance = (employeeId, date, field, value) => {
-    // 현재 근태 데이터 복사
-    const updatedAttendance = [...attendanceData];
-    
-    // 해당 직원의 해당 날짜 근태 기록 찾기
-    const recordIndex = updatedAttendance.findIndex(
-      record => record.employee_id === employeeId && record.date === date
-    );
-    
-    if (recordIndex !== -1) {
-      // 기존 기록 업데이트
-      updatedAttendance[recordIndex] = {
-        ...updatedAttendance[recordIndex],
-        [field]: value
-      };
-    } else {
-      // 새 기록 추가
-      updatedAttendance.push({
-        employee_id: employeeId,
-        date: date,
-        [field]: value,
-        // 다른 필드 기본값 설정
-        check_in: field === 'check_in' ? value : '',
-        check_out: field === 'check_out' ? value : '',
-        attendance_type: field === 'attendance_type' ? value : '정상'
-      });
-    }
-    
-    // 상태 업데이트
-    setAttendanceData(updatedAttendance);
-    
-    // 변경된 데이터 추적
-    const originalRecord = originalAttendanceData.find(
-      record => record.employee_id === employeeId && record.date === date
-    );
-    
-    const updatedRecord = updatedAttendance[recordIndex !== -1 ? recordIndex : updatedAttendance.length - 1];
-    const isModified = !originalRecord || 
-      originalRecord.check_in !== updatedRecord.check_in || 
-      originalRecord.check_out !== updatedRecord.check_out || 
-      originalRecord.attendance_type !== updatedRecord.attendance_type;
-    
-    if (isModified) {
-      // 이미 변경된 기록 목록에 있는지 확인
-      const modifiedIndex = modifiedAttendance.findIndex(
-        record => record.employee_id === employeeId && record.date === date
-      );
-      
-      if (modifiedIndex !== -1) {
-        // 기존 변경사항 업데이트
-        const updatedChanges = [...modifiedAttendance];
-        updatedChanges[modifiedIndex] = updatedRecord;
-        setModifiedAttendance(updatedChanges);
-      } else {
-        // 새 변경사항 추가
-        setModifiedAttendance([...modifiedAttendance, updatedRecord]);
-      }
-      
-      setHasAttendanceChanges(true);
-    }
-  };
-
-  // 근태 데이터 변경사항 서버로 전송
-  const saveAttendanceChanges = async () => {
-    if (!modifiedAttendance.length) {
-      return false; // 변경된 데이터가 없으면 무시
-    }
-    
-    try {
-      const response = await fetch('http://localhost:5000/api/attendance/update', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ attendance_data: modifiedAttendance })
-      });
-      
-      if (!response.ok) {
-        const errorData = await response.json();
-        throw new Error(errorData.error || '근태 데이터 업데이트 실패');
-      }
-      
-      const result = await response.json();
-      console.log('근태 데이터 업데이트 성공:', result);
-      
-      // 업데이트 후 상태 초기화
-      setOriginalAttendanceData(JSON.parse(JSON.stringify(attendanceData)));
-      setModifiedAttendance([]);
-      setHasAttendanceChanges(false);
-      
-      return true;
-    } catch (err) {
-      console.error('근태 데이터 업데이트 오류:', err);
-      setAlert({ 
-        open: true, 
-        message: `근태 데이터 업데이트 오류: ${err.message}`, 
-        severity: 'error' 
-      });
-      return false;
-    }
-  };
-
-  // 기간 변경 핸들러 (임시 업데이트용)
   const handlePeriodChange = (type, date) => {
     // 임시 날짜 업데이트 (유효성 검사 없이)
     if (type === 'start') {
@@ -632,49 +804,23 @@ const PayrollPayment = () => {
       return;
     }
 
-    // 날짜 유효성 추가 검증 (isValid 플러그인 없이도 동작)
+    // 날짜 유효성 추가 검증
     if (!dayjs(selectedPeriod.start).isValid() || !dayjs(selectedPeriod.end).isValid()) {
       setAlert({ open: true, message: '선택한 날짜가 유효하지 않습니다.', severity: 'error' });
       return;
     }
 
-    // 계산 전 근태 파일 변경 확인
-    await checkAttendanceFileChanges();
-
-    // 근태 변경 확인 및 처리
-    let attendanceUpdateSuccess = true;
-    let forceRecalculate = false;
+    // 계산 전 항상 근태 데이터 최신화 시도
+    setAlert({
+      open: true,
+      message: '계산 전 근태 데이터 최신화 중...',
+      severity: 'info'
+    });
     
-    // 근태 파일이 변경되었으면 동기화 확인
-    if (attendanceFileChanged) {
-      const userConfirmed = window.confirm(
-        '근태 파일이 변경되었습니다. 데이터베이스를 최신 상태로 동기화하시겠습니까?'
-      );
-      
-      if (userConfirmed) {
-        await syncAttendanceFile();
-        forceRecalculate = true;
-      }
-    }
+    // 소켓 연결 상태와 관계없이 강제 동기화 시도
+    await syncAttendanceFile();
+    await fetchAttendance(); // 동기화 후 다시 데이터 로드
     
-    // UI에서 근태 데이터 변경이 있으면 먼저 저장 시도
-    if (hasAttendanceChanges) {
-      attendanceUpdateSuccess = await saveAttendanceChanges();
-      if (attendanceUpdateSuccess) {
-        forceRecalculate = true;
-      }
-    }
-
-    // 근태 데이터 저장에 실패했지만 계속 진행을 원하는지 확인
-    if (!attendanceUpdateSuccess) {
-      const continueAnyway = window.confirm(
-        '근태 데이터 업데이트에 실패했습니다. 기존 데이터로 계속 진행하시겠습니까?'
-      );
-      if (!continueAnyway) {
-        return;
-      }
-    }
-
     setCalculating(true);
     setCalculationProgress(0);
     setProgressMessage('급여 계산을 시작합니다...');
@@ -687,8 +833,10 @@ const PayrollPayment = () => {
         end_date: selectedPeriod.end.format('YYYY-MM-DD'),
         employee_ids: selectedEmployees,
         attendance_data: attendanceData,
-        // 항상 재계산하도록 설정
-        force_recalculate: true
+        // 항상 재계산 및 캐시 무시
+        force_recalculate: true,
+        ignore_cache: true,
+        timestamp: new Date().getTime() // 캐시 방지용 타임스탬프
       };
       
       console.log('급여 계산 요청 데이터:', requestData);
@@ -698,6 +846,9 @@ const PayrollPayment = () => {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
+          'Cache-Control': 'no-cache, no-store, must-revalidate',
+          'Pragma': 'no-cache',
+          'Expires': '0'
         },
         body: JSON.stringify(requestData),
       });
@@ -733,7 +884,7 @@ const PayrollPayment = () => {
               setCalculationProgress(data.progress);
               setProgressMessage(data.message);
             } 
-            // 계산 로그 처리 (새로 추가)
+            // 계산 로그 처리
             else if (data.status === 'calculation_logs') {
               console.group(`급여 계산 결과 - 직원 ID: ${data.employee_id}`);
               if (data.logs && Array.isArray(data.logs)) {
@@ -777,29 +928,38 @@ const PayrollPayment = () => {
           
           // 기존 confirmPayrolls 중에서 일치하는 항목이 있는지 확인
           const existingPayroll = confirmedPayrolls.find(
-            p => p.employee_id === result.employee_id
+            p => p.employee_id === result.employee_id && 
+            p.period_start === result.period_start && 
+            p.period_end === result.period_end
           );
           
-          // 일치하는 항목이 있으면 해당 상태 사용, 없으면 기본값
           return {
             ...result,
-            status: existingPayroll ? 'confirmed' : 'unconfirmed'
+            status: existingPayroll ? existingPayroll.status : 'unconfirmed'
           };
         });
         
         setCalculationResults(resultsWithStatus);
-        setAlert({ open: true, message: '급여 계산 완료', severity: 'success' });
-      } else {
-        throw new Error('계산된 급여 데이터가 없습니다.');
       }
+      
+      setAlert({
+        open: true, 
+        message: `${calculationResults.length}명의 직원에 대한 급여 계산이 완료되었습니다.`, 
+        severity: 'success'
+      });
     } catch (err) {
-      setAlert({ open: true, message: `계산 오류: ${err.message}`, severity: 'error' });
+      console.error('급여 계산 오류:', err);
+      setAlert({
+        open: true,
+        message: `급여 계산 중 오류가 발생했습니다: ${err.message}`,
+        severity: 'error'
+      });
     } finally {
       setCalculating(false);
-      // 약간의 지연 후 진행 표시줄 숨김 (사용자에게 100% 완료를 보여주기 위해)
+      // 5초 후 진행 상태 표시 닫기
       setTimeout(() => {
         setShowProgressBar(false);
-      }, 1000);
+      }, 5000);
     }
   };
 
@@ -964,7 +1124,7 @@ const PayrollPayment = () => {
       }
     }
     
-    message.success("근태 데이터가 수정되었습니다. 급여 계산 시 적용됩니다.");
+    setAlert({ open: true, message: '근태 데이터가 수정되었습니다. 급여 계산 시 적용됩니다.', severity: 'success' });
   };
 
   // 근태 변경 다이얼로그 열기
@@ -975,6 +1135,70 @@ const PayrollPayment = () => {
   // 근태 변경 다이얼로그 닫기
   const handleCloseAttendanceChangesDialog = () => {
     setAttendanceChangesDialogOpen(false);
+  };
+
+  // 근태 데이터 변경사항 저장 함수
+  const saveAttendanceChanges = async () => {
+    try {
+      if (modifiedAttendance.length === 0) {
+        setAlert({ open: true, message: '저장할 근태 데이터 변경사항이 없습니다.', severity: 'info' });
+        return true;
+      }
+
+      setIsLoading(true);
+      
+      // 변경된 데이터 포맷팅
+      const changes = modifiedAttendance.map(record => ({
+        employee_id: record.employee_id,
+        date: record.date,
+        check_in: record.modified?.check_in || record.check_in,
+        check_out: record.modified?.check_out || record.check_out,
+        attendance_type: record.modified?.attendance_type || record.attendance_type
+      }));
+
+      // API 요청
+      const response = await fetch('http://localhost:5000/api/attendance/update-batch', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ records: changes })
+      });
+
+      if (!response.ok) {
+        const errorData = await response.json();
+        throw new Error(errorData.error || '근태 데이터 업데이트 실패');
+      }
+
+      const result = await response.json();
+      
+      // 저장 성공 후 데이터 재로드
+      await fetchAttendance();
+      
+      // 변경 내역 초기화
+      setModifiedAttendance([]);
+      setHasAttendanceChanges(false);
+      
+      // 다이얼로그 닫기
+      setAttendanceChangesDialogOpen(false);
+      
+      // 성공 메시지
+      setAlert({
+        open: true,
+        message: result.message || `${changes.length}개의 근태 데이터가 성공적으로 업데이트되었습니다.`,
+        severity: 'success'
+      });
+      
+      return true;
+    } catch (err) {
+      console.error('근태 데이터 저장 오류:', err);
+      setAlert({
+        open: true,
+        message: `근태 데이터 저장 오류: ${err.message}`,
+        severity: 'error'
+      });
+      return false;
+    } finally {
+      setIsLoading(false);
+    }
   };
 
   // 근태 변경 이력 조회 함수 추가
@@ -1061,13 +1285,39 @@ const PayrollPayment = () => {
               급여 지급관리
             </Typography>
             
-            {/* 근태 데이터 변경 뱃지 추가 */}
-            {hasAttendanceChanges && (
-              <AttendanceChangesBadge 
-                count={modifiedAttendance.length} 
-                onClick={handleOpenAttendanceChangesDialog} 
+            <Box display="flex" alignItems="center" gap={2}>
+              {/* 실시간 연결 상태 표시 */}
+              <Chip 
+                label={socketConnected ? "실시간 연결됨" : "연결 안됨"} 
+                color={socketConnected ? "success" : "error"}
+                size="small"
               />
-            )}
+              
+              {/* 마지막 업데이트 시간 */}
+              {lastUpdated && (
+                <Typography variant="caption" color="text.secondary">
+                  마지막 업데이트: {lastUpdated}
+                </Typography>
+              )}
+              
+              {/* 근태 데이터 변경 뱃지 */}
+              {hasAttendanceChanges && (
+                <AttendanceChangesBadge 
+                  count={modifiedAttendance.length} 
+                  onClick={handleOpenAttendanceChangesDialog} 
+                />
+              )}
+              
+              {/* 수동 변경 확인 버튼 */}
+              <Button 
+                variant="outlined" 
+                size="small" 
+                onClick={manualCheckChanges}
+                disabled={isLoading}
+              >
+                변경 확인
+              </Button>
+            </Box>
           </Box>
           
           <Typography variant="body1" sx={{ color: theme.palette.text.secondary, mb: 4 }}>
@@ -1335,16 +1585,16 @@ const PayrollPayment = () => {
                     근태 변경 이력
                   </Button>
                   
-                  {attendanceFileChanged && (
-                    <Button
-                      variant="contained"
-                      color="warning"
-                      startIcon={<SyncIcon />}
-                      onClick={syncAttendanceFile}
-                    >
-                      근태 파일 동기화
-                    </Button>
-                  )}
+                  {/* 근태 파일 동기화 버튼 - 항상 표시 */}
+                  <Button
+                    variant="contained"
+                    color={attendanceFileChanged ? "warning" : "primary"}
+                    startIcon={<SyncIcon />}
+                    onClick={syncAttendanceFile}
+                    disabled={isLoading}
+                  >
+                    {isLoading ? "처리 중..." : "근태 파일 동기화"}
+                  </Button>
                 </Box>
               </StyledPaper>
             </Grid>
@@ -1379,22 +1629,24 @@ const PayrollPayment = () => {
                         </Button>
                       </Badge>
                     )}
-                    {attendanceFileChanged && (
-                      <Button
-                        startIcon={<SyncIcon />}
-                        variant="outlined"
-                        color="primary"
-                        size="small"
-                        onClick={syncAttendanceFile}
-                        sx={{ mr: 2 }}
-                      >
-                        근태 파일 동기화
-                      </Button>
-                    )}
+                    
+                    {/* 근태 파일 동기화 버튼 - 항상 표시 */}
+                    <Button
+                      startIcon={<SyncIcon />}
+                      variant="outlined"
+                      color={attendanceFileChanged ? "warning" : "primary"}
+                      size="small"
+                      onClick={syncAttendanceFile}
+                      disabled={isLoading}
+                      sx={{ mr: 2 }}
+                    >
+                      {isLoading ? "처리 중..." : "변경사항 저장"}
+                    </Button>
+                    
                     <StyledButton
                       variant="contained"
                       onClick={handleCalculatePayroll}
-                      disabled={calculating}
+                      disabled={calculating || isLoading}
                     >
                       {calculating ? <CircularProgress size={24} /> : '급여 계산'}
                     </StyledButton>
@@ -1465,10 +1717,7 @@ const PayrollPayment = () => {
             </Box>
           </DialogTitle>
           <DialogContent>
-            <Typography variant="body1" gutterBottom>
-              {selectedEmployees.length}명의 직원에 대한 급여를 확정하시겠습니까?
-            </Typography>
-            <Typography variant="body2" color="text.secondary">
+            <Typography variant="body1" sx={{ mb: 2 }}>
               급여 기간: {selectedPeriod.start?.format('YYYY년 MM월 DD일')} ~ {selectedPeriod.end?.format('YYYY년 MM월 DD일')}
             </Typography>
             <Alert severity="warning" sx={{ mt: 2 }}>

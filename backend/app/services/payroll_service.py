@@ -1,6 +1,9 @@
 import pandas as pd
 import logging
 import os
+import hashlib
+import threading
+import time
 from datetime import datetime
 from typing import Dict, List, Optional
 import uuid
@@ -17,6 +20,9 @@ from models.models import (
 from utils.pay_calculator import PayCalculator
 from utils.insurance_calculator import InsuranceCalculator
 
+# 파일 시스템 감시 기능 위한 이벤트
+FILE_CHANGED_EVENT = threading.Event()
+
 
 class PayrollService:
     """급여 관리 서비스 클래스
@@ -31,11 +37,28 @@ class PayrollService:
         """
         self.config = config
         self.setup_logging()
-        # 근태 파일 수정 시간 초기화
-        self.attendance_file_last_modified = self._get_attendance_file_modified_time()
-        self.logger.info(
-            f"근태 파일 초기 수정 시간: {self.attendance_file_last_modified}"
+        # 근태 파일 관련 변수 초기화
+        self.attendance_file_path = os.path.join(
+            os.path.dirname(
+                os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+            ),
+            "data",
+            "attendance.csv",
         )
+        # 타임스탬프 및 해시값 초기화
+        self.attendance_file_last_modified = self._get_attendance_file_modified_time()
+        self.attendance_file_hash = self._calculate_file_hash()
+        self.logger.info(
+            f"근태 파일 초기화 - 수정 시간: {self.attendance_file_last_modified}, 해시: {self.attendance_file_hash}"
+        )
+
+        # 파일 감시 스레드 시작
+        self.file_watcher_enabled = True
+        self.file_watcher_thread = None
+        self.start_file_watcher()
+
+        # 웹소켓 이벤트 핸들러 리스트
+        self.change_event_handlers = []
 
     def setup_logging(self):
         """로깅 설정"""
@@ -49,33 +72,57 @@ class PayrollService:
     def _get_attendance_file_modified_time(self) -> float:
         """근태 파일의 최근 수정 시간을 반환합니다."""
         try:
-            attendance_file_path = os.path.join(
-                os.path.dirname(
-                    os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-                ),
-                "data",
-                "attendance.csv",
-            )
-            if os.path.exists(attendance_file_path):
-                return os.path.getmtime(attendance_file_path)
+            if os.path.exists(self.attendance_file_path):
+                return os.path.getmtime(self.attendance_file_path)
             return 0
         except Exception as e:
             self.logger.error(f"근태 파일 수정 시간 확인 오류: {str(e)}")
             return 0
 
+    def _calculate_file_hash(self) -> str:
+        """파일 내용의 해시값 계산하여 반환합니다."""
+        try:
+            if not os.path.exists(self.attendance_file_path):
+                return ""
+
+            with open(self.attendance_file_path, "rb") as f:
+                return hashlib.md5(f.read()).hexdigest()
+        except Exception as e:
+            self.logger.error(f"파일 해시 계산 오류: {str(e)}")
+            return ""
+
     def check_attendance_file_changed(self) -> bool:
         """근태 파일이 변경되었는지 확인합니다.
+
+        내용 기반(해시값)과 타임스탬프 두 가지 방식으로 검사합니다.
 
         Returns:
             bool: 파일이 변경되었으면 True, 그렇지 않으면 False
         """
+        # 현재 수정 시간 및 해시값 확인
         current_modified_time = self._get_attendance_file_modified_time()
-        if current_modified_time > self.attendance_file_last_modified:
+        current_hash = self._calculate_file_hash()
+
+        # 변경 여부 확인 (시간 또는 해시값 변경)
+        time_changed = current_modified_time > self.attendance_file_last_modified
+        content_changed = current_hash != self.attendance_file_hash
+
+        if time_changed or content_changed:
             self.logger.info(
-                f"근태 파일 변경 감지: 이전={self.attendance_file_last_modified}, 현재={current_modified_time}"
+                f"근태 파일 변경 감지: 수정시간 변경={time_changed}, 내용 변경={content_changed}"
             )
+            self.logger.info(
+                f"이전 정보: 시간={self.attendance_file_last_modified}, 해시={self.attendance_file_hash}"
+            )
+            self.logger.info(
+                f"현재 정보: 시간={current_modified_time}, 해시={current_hash}"
+            )
+
+            # 상태 업데이트
             self.attendance_file_last_modified = current_modified_time
+            self.attendance_file_hash = current_hash
             return True
+
         return False
 
     def sync_attendance_if_changed(self) -> bool:
@@ -86,21 +133,55 @@ class PayrollService:
         Returns:
             bool: 동기화 되었으면 True, 그렇지 않으면 False
         """
+        # 파일 변경 확인 (해시값 비교)
         if not self.check_attendance_file_changed():
             return False
 
         self.logger.info("근태 파일 변경 감지: 데이터베이스 선택적 동기화 시작")
         try:
-            # 근태 CSV 파일 로드
-            attendance_file_path = os.path.join(
-                os.path.dirname(
-                    os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-                ),
-                "data",
-                "attendance.csv",
+            # CSV 파일 데이터 로드
+            csv_data = self._load_csv_data()
+            if not csv_data:
+                self.logger.warning("CSV 파일에서 로드된 데이터가 없습니다.")
+                return False
+
+            # 데이터베이스 데이터 로드
+            db_data = self._load_db_attendance_data()
+
+            # 변경된 기록 감지 및 업데이트
+            updates, inserts, unchanged = self._detect_attendance_changes(
+                csv_data, db_data
             )
+
+            self.logger.info(
+                f"변경 감지 결과: 업데이트={len(updates)}, 삽입={len(inserts)}, 변경없음={len(unchanged)}"
+            )
+
+            # 변경 사항이 없으면 종료
+            if not updates and not inserts:
+                self.logger.info("변경된 근태 기록이 없습니다.")
+                return False
+
+            # 변경 사항을 데이터베이스에 반영
+            self._apply_attendance_changes(updates, inserts)
+
+            return True
+
+        except Exception as e:
+            self.logger.error(f"근태 데이터 선택적 동기화 오류: {str(e)}")
+            return False
+
+    def _load_csv_data(self) -> List[Dict]:
+        """CSV 파일에서 근태 데이터 로드"""
+        try:
+            if not os.path.exists(self.attendance_file_path):
+                self.logger.error(
+                    f"근태 파일이 존재하지 않습니다: {self.attendance_file_path}"
+                )
+                return []
+
             df = pd.read_csv(
-                attendance_file_path, encoding="utf-8", on_bad_lines="warn"
+                self.attendance_file_path, encoding="utf-8", on_bad_lines="warn"
             )
 
             # 데이터 전처리
@@ -115,259 +196,211 @@ class PayrollService:
             else:
                 df["remarks"] = df["remarks"].fillna("").astype(str).str.strip()
 
-            attendance_data = df.to_dict("records")
+            # 딕셔너리 리스트로 변환
+            data = df.to_dict("records")
+            self.logger.info(f"CSV 파일에서 {len(data)}개의 근태 기록을 로드했습니다.")
+            return data
 
-            # 데이터베이스에 선택적 동기화
-            session = get_db_session()
+        except Exception as e:
+            self.logger.error(f"CSV 파일 로드 오류: {str(e)}")
+            return []
+
+    def _load_db_attendance_data(self) -> Dict[str, Attendance]:
+        """데이터베이스에서 근태 데이터 로드하여 매핑 딕셔너리 반환"""
+        session = get_db_session()
+        try:
+            records = session.query(Attendance).all()
+            # 키: {employee_id}_{date}, 값: Attendance 객체
+            return {f"{r.employee_id}_{r.date}": r for r in records}
+        except Exception as e:
+            self.logger.error(f"DB 데이터 로드 오류: {str(e)}")
+            return {}
+        finally:
+            session.close()
+
+    def _detect_attendance_changes(self, csv_data, db_data_dict):
+        """CSV 데이터와 DB 데이터를 비교하여 변경된 레코드 감지"""
+        updates = []  # 업데이트할 레코드
+        inserts = []  # 새로 추가할 레코드
+        unchanged = []  # 변경 없는 레코드
+
+        # CSV의 모든 레코드 처리
+        for record in csv_data:
             try:
-                # 수정된 통계 수치 초기화
-                created_count = 0
-                updated_count = 0
-                unchanged_count = 0
-                error_count = 0
-                audit_count = 0
+                # 필수 필드 확인
+                if not record.get("employee_id") or not record.get("date"):
+                    self.logger.warning(f"잘못된 근태 기록 무시: {record}")
+                    continue
 
-                # 현재 데이터베이스의 모든 근태 기록을 가져옴
-                self.logger.info("현재 데이터베이스에서 기존 근태 기록 조회 중...")
-                existing_records = {}
-                for record in session.query(Attendance).all():
-                    key = f"{record.employee_id}_{record.date}"
-                    existing_records[key] = record
+                # 날짜 형식 처리
+                try:
+                    date_str = record["date"]
+                    date_obj = datetime.strptime(date_str, "%Y-%m-%d").date()
+                except ValueError:
+                    self.logger.error(f"날짜 형식 오류: {record['date']}")
+                    continue
 
-                self.logger.info(
-                    f"{len(existing_records)}개의 기존 근태 기록 로드 완료"
-                )
+                # 기록 키 생성
+                record_key = f"{record['employee_id']}_{date_obj}"
 
-                # CSV 파일에 있는 모든 기록의 키를 저장 - 삭제된 항목 감지용
-                csv_record_keys = set()
+                # DB에 해당 기록이 있는지 확인
+                if record_key in db_data_dict:
+                    # 기존 레코드 추출
+                    db_record = db_data_dict[record_key]
 
-                # CSV의 모든 레코드를 처리
-                for record in attendance_data:
-                    try:
-                        # 필수 필드 확인
-                        if not record.get("employee_id") or not record.get("date"):
-                            self.logger.warning(f"잘못된 근태 기록 무시: {record}")
-                            error_count += 1
-                            continue
+                    # 변경 사항이 있는지 확인
+                    if (
+                        record.get("check_in", "") != db_record.check_in
+                        or record.get("check_out", "") != db_record.check_out
+                        or record.get("attendance_type", "정상")
+                        != db_record.attendance_type
+                        or record.get("remarks", "") != db_record.remarks
+                    ):
 
-                        # 날짜 문자열을 date 객체로 변환
-                        try:
-                            if isinstance(record["date"], str):
-                                date_obj = datetime.strptime(
-                                    record["date"], "%Y-%m-%d"
-                                ).date()
-                            else:
-                                date_obj = record["date"]
-                        except ValueError as e:
-                            self.logger.error(
-                                f"날짜 변환 오류 ({record['date']}): {str(e)}"
-                            )
-                            error_count += 1
-                            continue
+                        # 변경 감지 - 업데이트 필요
+                        updates.append(
+                            {
+                                "db_record": db_record,
+                                "csv_record": record,
+                                "date_obj": date_obj,
+                            }
+                        )
+                    else:
+                        # 변경 없음
+                        unchanged.append(record_key)
+                else:
+                    # DB에 없는 레코드 - 새로 추가
+                    inserts.append({"csv_record": record, "date_obj": date_obj})
+            except Exception as e:
+                self.logger.error(f"레코드 변경 감지 오류: {str(e)}")
+                continue
 
-                        # 기존 레코드 키 생성
-                        record_key = f"{record['employee_id']}_{date_obj}"
-                        csv_record_keys.add(record_key)
+        return updates, inserts, unchanged
 
-                        # 필드 기본값 처리
-                        check_in = record.get("check_in", "")
-                        check_out = record.get("check_out", "")
-                        attendance_type = record.get("attendance_type", "정상")
-                        remarks = record.get("remarks", "")
+    def _apply_attendance_changes(self, updates, inserts):
+        """데이터베이스에 변경 사항 적용"""
+        session = get_db_session()
+        try:
+            # 감사 기록 생성을 위한 시간과 사용자 정보
+            change_time = datetime.now()
+            change_user = "system_sync"
 
-                        # 기존 레코드가 있는지 확인하고 필요한 경우 업데이트
-                        if record_key in existing_records:
-                            existing_record = existing_records[record_key]
+            # 변경된 레코드 업데이트
+            for update_info in updates:
+                db_record = update_info["db_record"]
+                csv_record = update_info["csv_record"]
 
-                            # 변경사항 확인
-                            is_changed = False
-                            changes = {}
-                            audit_records = []
+                # 변경 전 값 저장
+                old_check_in = db_record.check_in
+                old_check_out = db_record.check_out
+                old_type = db_record.attendance_type
+                old_remarks = db_record.remarks
 
-                            if existing_record.check_in != check_in:
-                                changes["check_in"] = (
-                                    existing_record.check_in,
-                                    check_in,
-                                )
-                                # 변경 이력 생성
-                                audit_records.append(
-                                    AttendanceAudit(
-                                        employee_id=existing_record.employee_id,
-                                        date=existing_record.date,
-                                        field_name="check_in",
-                                        old_value=existing_record.check_in,
-                                        new_value=check_in,
-                                        change_type="update",
-                                        changed_by="system",
-                                        changed_at=datetime.now(),
-                                        ip_address="127.0.0.1",
-                                    )
-                                )
-                                existing_record.check_in = check_in
-                                is_changed = True
+                # 변경 사항 적용
+                db_record.check_in = csv_record.get("check_in", "")
+                db_record.check_out = csv_record.get("check_out", "")
+                db_record.attendance_type = csv_record.get("attendance_type", "정상")
+                db_record.remarks = csv_record.get("remarks", "")
 
-                            if existing_record.check_out != check_out:
-                                changes["check_out"] = (
-                                    existing_record.check_out,
-                                    check_out,
-                                )
-                                # 변경 이력 생성
-                                audit_records.append(
-                                    AttendanceAudit(
-                                        employee_id=existing_record.employee_id,
-                                        date=existing_record.date,
-                                        field_name="check_out",
-                                        old_value=existing_record.check_out,
-                                        new_value=check_out,
-                                        change_type="update",
-                                        changed_by="system",
-                                        changed_at=datetime.now(),
-                                        ip_address="127.0.0.1",
-                                    )
-                                )
-                                existing_record.check_out = check_out
-                                is_changed = True
-
-                            if existing_record.attendance_type != attendance_type:
-                                changes["attendance_type"] = (
-                                    existing_record.attendance_type,
-                                    attendance_type,
-                                )
-                                # 변경 이력 생성
-                                audit_records.append(
-                                    AttendanceAudit(
-                                        employee_id=existing_record.employee_id,
-                                        date=existing_record.date,
-                                        field_name="attendance_type",
-                                        old_value=existing_record.attendance_type,
-                                        new_value=attendance_type,
-                                        change_type="update",
-                                        changed_by="system",
-                                        changed_at=datetime.now(),
-                                        ip_address="127.0.0.1",
-                                    )
-                                )
-                                existing_record.attendance_type = attendance_type
-                                is_changed = True
-
-                            if existing_record.remarks != remarks:
-                                changes["remarks"] = (existing_record.remarks, remarks)
-                                # 변경 이력 생성
-                                audit_records.append(
-                                    AttendanceAudit(
-                                        employee_id=existing_record.employee_id,
-                                        date=existing_record.date,
-                                        field_name="remarks",
-                                        old_value=existing_record.remarks,
-                                        new_value=remarks,
-                                        change_type="update",
-                                        changed_by="system",
-                                        changed_at=datetime.now(),
-                                        ip_address="127.0.0.1",
-                                    )
-                                )
-                                existing_record.remarks = remarks
-                                is_changed = True
-
-                            if is_changed:
-                                # 변경 사항이 있으면 이력 기록 및 업데이트 시간 갱신
-                                existing_record.updated_at = datetime.now()
-
-                                # 변경 이력 저장
-                                for audit in audit_records:
-                                    session.add(audit)
-                                    audit_count += 1
-
-                                self.logger.info(
-                                    f"근태 기록 업데이트: {record_key}, 변경사항: {changes}"
-                                )
-                                updated_count += 1
-                            else:
-                                unchanged_count += 1
-
-                        else:
-                            # 새 근태 기록 생성
-                            new_attendance = Attendance(
-                                employee_id=record["employee_id"],
-                                date=date_obj,
-                                check_in=check_in,
-                                check_out=check_out,
-                                attendance_type=attendance_type,
-                                remarks=remarks,
-                            )
-                            session.add(new_attendance)
-                            created_count += 1
-
-                            # 생성 이력 기록
-                            create_audit = AttendanceAudit(
-                                employee_id=record["employee_id"],
-                                date=date_obj,
-                                field_name="record",
-                                old_value=None,
-                                new_value="새 근태 기록 생성",
-                                change_type="create",
-                                changed_by="system",
-                                changed_at=datetime.now(),
-                                ip_address="127.0.0.1",
-                            )
-                            session.add(create_audit)
-                            audit_count += 1
-
-                            # 1000건마다 커밋하여 메모리 관리
-                            if (created_count + updated_count) % 1000 == 0:
-                                session.commit()
-                                self.logger.info(
-                                    f"중간 처리 현황: 생성={created_count}, 업데이트={updated_count}, 변경없음={unchanged_count}, 오류={error_count}, 이력={audit_count}"
-                                )
-
-                    except Exception as e:
-                        self.logger.error(f"근태 기록 처리 오류: {str(e)}")
-                        error_count += 1
-                        continue
-
-                # CSV에 없는 기록 삭제 처리 (데이터베이스에는 있지만 CSV에는 없는 항목)
-                for db_key, db_record in existing_records.items():
-                    if db_key not in csv_record_keys:
-                        # 삭제 이력 기록
-                        delete_audit = AttendanceAudit(
+                # 감사 기록 추가 (변경된 필드만)
+                if old_check_in != db_record.check_in:
+                    session.add(
+                        AttendanceAudit(
                             employee_id=db_record.employee_id,
                             date=db_record.date,
-                            field_name="record",
-                            old_value=f"출근: {db_record.check_in}, 퇴근: {db_record.check_out}, 유형: {db_record.attendance_type}",
-                            new_value=None,
-                            change_type="delete",
-                            changed_by="system",
-                            changed_at=datetime.now(),
-                            ip_address="127.0.0.1",
+                            field_name="check_in",
+                            old_value=old_check_in,
+                            new_value=db_record.check_in,
+                            change_type="update",
+                            change_time=change_time,
+                            change_user=change_user,
                         )
-                        session.add(delete_audit)
-                        audit_count += 1
+                    )
 
-                        # 데이터베이스에서 삭제
-                        session.delete(db_record)
-                        self.logger.info(f"근태 기록 삭제: {db_key}")
+                if old_check_out != db_record.check_out:
+                    session.add(
+                        AttendanceAudit(
+                            employee_id=db_record.employee_id,
+                            date=db_record.date,
+                            field_name="check_out",
+                            old_value=old_check_out,
+                            new_value=db_record.check_out,
+                            change_type="update",
+                            change_time=change_time,
+                            change_user=change_user,
+                        )
+                    )
 
-                # 최종 커밋
-                session.commit()
-                self.logger.info(
-                    f"근태 데이터 선택적 동기화 완료: 총 {len(attendance_data)}건 처리"
+                if old_type != db_record.attendance_type:
+                    session.add(
+                        AttendanceAudit(
+                            employee_id=db_record.employee_id,
+                            date=db_record.date,
+                            field_name="attendance_type",
+                            old_value=old_type,
+                            new_value=db_record.attendance_type,
+                            change_type="update",
+                            change_time=change_time,
+                            change_user=change_user,
+                        )
+                    )
+
+                if old_remarks != db_record.remarks:
+                    session.add(
+                        AttendanceAudit(
+                            employee_id=db_record.employee_id,
+                            date=db_record.date,
+                            field_name="remarks",
+                            old_value=old_remarks,
+                            new_value=db_record.remarks,
+                            change_type="update",
+                            change_time=change_time,
+                            change_user=change_user,
+                        )
+                    )
+
+            # 새 레코드 추가
+            for insert_info in inserts:
+                csv_record = insert_info["csv_record"]
+                date_obj = insert_info["date_obj"]
+
+                # 새 근태 기록 생성
+                new_record = Attendance(
+                    employee_id=csv_record["employee_id"],
+                    date=date_obj,
+                    check_in=csv_record.get("check_in", ""),
+                    check_out=csv_record.get("check_out", ""),
+                    attendance_type=csv_record.get("attendance_type", "정상"),
+                    remarks=csv_record.get("remarks", ""),
                 )
-                self.logger.info(
-                    f"처리 결과: 생성={created_count}, 업데이트={updated_count}, 변경없음={unchanged_count}, 오류={error_count}, 이력={audit_count}"
+                session.add(new_record)
+
+                # 감사 기록 추가
+                session.add(
+                    AttendanceAudit(
+                        employee_id=csv_record["employee_id"],
+                        date=date_obj,
+                        field_name="*",
+                        old_value="",
+                        new_value="새 근태 기록 생성",
+                        change_type="create",
+                        change_time=change_time,
+                        change_user=change_user,
+                    )
                 )
 
-                # 처리 결과 요약 반환
-                return True
-            except Exception as e:
-                session.rollback()
-                self.logger.error(f"근태 데이터 동기화 중 오류 발생: {str(e)}")
-                raise
-            finally:
-                session.close()
+            # 트랜잭션 커밋
+            session.commit()
+            self.logger.info(
+                f"{len(updates)}개 기록 업데이트, {len(inserts)}개 기록 새로 추가됨"
+            )
+
         except Exception as e:
-            self.logger.error(f"근태 파일 처리 중 오류 발생: {str(e)}")
+            session.rollback()
+            self.logger.error(f"데이터베이스 업데이트 오류: {str(e)}")
             raise
-        return False
+        finally:
+            session.close()
 
     def load_payroll_data(self) -> tuple[pd.DataFrame, str]:
         """급여 데이터 로드 및 전처리
@@ -1069,3 +1102,84 @@ class PayrollService:
         except Exception as e:
             self.logger.error(f"급여 계산 및 저장 중 오류 발생: {str(e)}")
             raise Exception(f"급여 계산 및 저장 중 오류가 발생했습니다: {str(e)}")
+
+    def start_file_watcher(self):
+        """파일 시스템 감시 서비스 시작"""
+        if self.file_watcher_thread is not None and self.file_watcher_thread.is_alive():
+            self.logger.info("파일 감시 스레드가 이미 실행 중입니다.")
+            return
+
+        self.file_watcher_enabled = True
+        self.file_watcher_thread = threading.Thread(
+            target=self._watch_file_task, daemon=True, name="AttendanceFileWatcher"
+        )
+        self.file_watcher_thread.start()
+        self.logger.info("근태 파일 감시 서비스가 시작되었습니다.")
+
+    def stop_file_watcher(self):
+        """파일 시스템 감시 서비스 중지"""
+        self.file_watcher_enabled = False
+        if self.file_watcher_thread and self.file_watcher_thread.is_alive():
+            self.file_watcher_thread.join(timeout=3.0)
+            if self.file_watcher_thread.is_alive():
+                self.logger.warning("파일 감시 스레드가 3초 내에 종료되지 않았습니다.")
+        self.logger.info("근태 파일 감시 서비스가 중지되었습니다.")
+
+    def _watch_file_task(self):
+        """파일 시스템 감시 작업 (별도 스레드에서 실행)"""
+        self.logger.info(f"파일 감시 시작: {self.attendance_file_path}")
+        last_hash = self.attendance_file_hash
+
+        while self.file_watcher_enabled:
+            try:
+                # 1초마다 파일 상태 확인
+                time.sleep(1)
+
+                # 파일이 존재하는지 확인
+                if not os.path.exists(self.attendance_file_path):
+                    continue
+
+                # 현재 파일 해시값 계산
+                current_hash = self._calculate_file_hash()
+
+                # 변경이 감지되면 DB 동기화 실행
+                if current_hash != last_hash:
+                    self.logger.info(f"파일 변경 감지됨 (해시: {current_hash})")
+                    last_hash = current_hash
+
+                    # 동기화 실행
+                    sync_result = self.sync_attendance_if_changed()
+
+                    # 변경 이벤트 발생 알림
+                    if sync_result:
+                        self._notify_change_event()
+
+            except Exception as e:
+                self.logger.error(f"파일 감시 오류: {str(e)}")
+                # 오류 발생시 잠시 대기
+                time.sleep(5)
+
+        self.logger.info("파일 감시 작업이 종료되었습니다.")
+
+    def _notify_change_event(self):
+        """근태 파일 변경을 알리는 글로벌 이벤트를 설정합니다."""
+        # 글로벌 이벤트 설정
+        FILE_CHANGED_EVENT.set()
+        FILE_CHANGED_EVENT.clear()  # 이벤트 즉시 초기화
+
+        # 등록된 모든 이벤트 핸들러 호출
+        for handler in self.change_event_handlers:
+            try:
+                handler()
+            except Exception as e:
+                self.logger.error(f"이벤트 핸들러 호출 오류: {str(e)}")
+
+    def register_change_handler(self, handler):
+        """근태 파일 변경 이벤트 핸들러 등록"""
+        if handler not in self.change_event_handlers:
+            self.change_event_handlers.append(handler)
+
+    def unregister_change_handler(self, handler):
+        """근태 파일 변경 이벤트 핸들러 등록 해제"""
+        if handler in self.change_event_handlers:
+            self.change_event_handlers.remove(handler)

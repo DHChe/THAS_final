@@ -2,6 +2,29 @@ import { insuranceCalculator, taxCalculator } from './insuranceCalculator';
 import { isHoliday } from 'holiday-kr';
 import { format } from 'date-fns';
 
+// 24:00:00 형식의 시간을 다음날 00:00:00으로 변환하는 유틸리티 함수
+function processTimeString(timeStr) {
+  if (!timeStr) return timeStr;
+  
+  // 24:00:00 형식 감지
+  if (timeStr.includes(' 24:00:00')) {
+    // 날짜와 시간 부분 분리
+    const [datePart] = timeStr.split(' ');
+    
+    // 날짜를 Date 객체로 변환
+    const date = new Date(datePart);
+    
+    // 하루 추가
+    date.setDate(date.getDate() + 1);
+    
+    // 다음날 00:00:00 형식으로 반환
+    const nextDay = date.toISOString().split('T')[0];
+    return `${nextDay} 00:00:00`;
+  }
+  
+  return timeStr;
+}
+
 export class SalaryCalculator {
   constructor(startDate, endDate) {
     this.startDate = new Date(startDate);
@@ -28,6 +51,9 @@ export class SalaryCalculator {
   }
 
   calculateWorkHours(checkIn, checkOut) {
+    // 24:00:00 형식 처리
+    checkOut = processTimeString(checkOut);
+    
     // 근무시간 계산 (휴게시간 자동 차감)
     const start = new Date(checkIn);
     const end = new Date(checkOut);

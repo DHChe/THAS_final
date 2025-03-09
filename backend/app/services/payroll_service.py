@@ -19,9 +19,27 @@ from models.models import (
 )
 from utils.pay_calculator import PayCalculator
 from utils.insurance_calculator import InsuranceCalculator
+from watchdog.observers import Observer
+from watchdog.events import FileSystemEventHandler
 
 # 파일 시스템 감시 기능 위한 이벤트
 FILE_CHANGED_EVENT = threading.Event()
+
+
+# 파일 시스템 이벤트 핸들러 정의
+class AttendanceFileHandler(FileSystemEventHandler):
+    def __init__(self, service):
+        self.service = service
+
+    def on_modified(self, event):
+        if (
+            not event.is_directory
+            and event.src_path == self.service.attendance_file_path
+        ):
+            self.service.logger.info(f"파일 변경 감지: {event.src_path}")
+            sync_result = self.service.sync_attendance_if_changed()
+            if sync_result:
+                self.service._notify_change_event()
 
 
 class PayrollService:
@@ -52,13 +70,13 @@ class PayrollService:
             f"근태 파일 초기화 - 수정 시간: {self.attendance_file_last_modified}, 해시: {self.attendance_file_hash}"
         )
 
-        # 파일 감시 스레드 시작
-        self.file_watcher_enabled = True
-        self.file_watcher_thread = None
-        self.start_file_watcher()
-
         # 웹소켓 이벤트 핸들러 리스트
         self.change_event_handlers = []
+
+        # Watchdog Observer 설정
+        self.observer = None
+        self.event_handler = None
+        self.start_file_watcher()
 
     def setup_logging(self):
         """로깅 설정"""
@@ -1104,62 +1122,44 @@ class PayrollService:
             raise Exception(f"급여 계산 및 저장 중 오류가 발생했습니다: {str(e)}")
 
     def start_file_watcher(self):
-        """파일 시스템 감시 서비스 시작"""
-        if self.file_watcher_thread is not None and self.file_watcher_thread.is_alive():
-            self.logger.info("파일 감시 스레드가 이미 실행 중입니다.")
+        """파일 시스템 감시 서비스 시작 (watchdog 사용)"""
+        if self.observer is not None and self.observer.is_alive():
+            self.logger.info("파일 감시 Observer가 이미 실행 중입니다.")
             return
 
-        self.file_watcher_enabled = True
-        self.file_watcher_thread = threading.Thread(
-            target=self._watch_file_task, daemon=True, name="AttendanceFileWatcher"
-        )
-        self.file_watcher_thread.start()
-        self.logger.info("근태 파일 감시 서비스가 시작되었습니다.")
+        try:
+            # 이벤트 핸들러 및 Observer 설정
+            self.event_handler = AttendanceFileHandler(self)
+            self.observer = Observer()
+
+            # 감시할 디렉토리 설정 (파일 자체가 아닌 파일이 있는 디렉토리를 감시)
+            watch_dir = os.path.dirname(self.attendance_file_path)
+            self.observer.schedule(self.event_handler, path=watch_dir, recursive=False)
+
+            # Observer 시작
+            self.observer.start()
+            self.logger.info(
+                f"근태 파일 감시 서비스(watchdog)가 시작되었습니다. 감시 디렉토리: {watch_dir}"
+            )
+        except Exception as e:
+            self.logger.error(f"파일 감시 서비스 시작 오류: {str(e)}")
 
     def stop_file_watcher(self):
-        """파일 시스템 감시 서비스 중지"""
-        self.file_watcher_enabled = False
-        if self.file_watcher_thread and self.file_watcher_thread.is_alive():
-            self.file_watcher_thread.join(timeout=3.0)
-            if self.file_watcher_thread.is_alive():
-                self.logger.warning("파일 감시 스레드가 3초 내에 종료되지 않았습니다.")
-        self.logger.info("근태 파일 감시 서비스가 중지되었습니다.")
-
-    def _watch_file_task(self):
-        """파일 시스템 감시 작업 (별도 스레드에서 실행)"""
-        self.logger.info(f"파일 감시 시작: {self.attendance_file_path}")
-        last_hash = self.attendance_file_hash
-
-        while self.file_watcher_enabled:
+        """파일 시스템 감시 서비스 중지 (watchdog)"""
+        if self.observer and self.observer.is_alive():
             try:
-                # 1초마다 파일 상태 확인
-                time.sleep(1)
-
-                # 파일이 존재하는지 확인
-                if not os.path.exists(self.attendance_file_path):
-                    continue
-
-                # 현재 파일 해시값 계산
-                current_hash = self._calculate_file_hash()
-
-                # 변경이 감지되면 DB 동기화 실행
-                if current_hash != last_hash:
-                    self.logger.info(f"파일 변경 감지됨 (해시: {current_hash})")
-                    last_hash = current_hash
-
-                    # 동기화 실행
-                    sync_result = self.sync_attendance_if_changed()
-
-                    # 변경 이벤트 발생 알림
-                    if sync_result:
-                        self._notify_change_event()
-
+                self.observer.stop()
+                self.observer.join(timeout=3.0)
+                if self.observer.is_alive():
+                    self.logger.warning(
+                        "파일 감시 Observer가 3초 내에 종료되지 않았습니다."
+                    )
+                else:
+                    self.logger.info("근태 파일 감시 서비스가 중지되었습니다.")
             except Exception as e:
-                self.logger.error(f"파일 감시 오류: {str(e)}")
-                # 오류 발생시 잠시 대기
-                time.sleep(5)
-
-        self.logger.info("파일 감시 작업이 종료되었습니다.")
+                self.logger.error(f"파일 감시 서비스 중지 오류: {str(e)}")
+        else:
+            self.logger.info("파일 감시 서비스가 실행 중이 아닙니다.")
 
     def _notify_change_event(self):
         """근태 파일 변경을 알리는 글로벌 이벤트를 설정합니다."""

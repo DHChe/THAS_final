@@ -804,29 +804,22 @@ const PayrollPayment = () => {
       return;
     }
 
-    // 날짜 유효성 추가 검증
-    if (!dayjs(selectedPeriod.start).isValid() || !dayjs(selectedPeriod.end).isValid()) {
-      setAlert({ open: true, message: '선택한 날짜가 유효하지 않습니다.', severity: 'error' });
-      return;
-    }
-
-    // 계산 전 항상 근태 데이터 최신화 시도
-    setAlert({
-      open: true,
-      message: '계산 전 근태 데이터 최신화 중...',
-      severity: 'info'
-    });
-    
-    // 소켓 연결 상태와 관계없이 강제 동기화 시도
-    await syncAttendanceFile();
-    await fetchAttendance(); // 동기화 후 다시 데이터 로드
-    
     setCalculating(true);
     setCalculationProgress(0);
-    setProgressMessage('급여 계산을 시작합니다...');
+    setProgressMessage('근태 데이터 동기화 중...');
     setShowProgressBar(true);
-    
+
     try {
+      // 동기화 강제 실행 및 완료 대기
+      const syncSuccess = await syncAttendanceFile();
+      if (!syncSuccess) {
+        throw new Error('근태 데이터 동기화에 실패했습니다.');
+      }
+
+      // 동기화 후 데이터 재로드
+      await fetchAttendance();
+      setProgressMessage('급여 계산을 시작합니다...');
+
       // 계산 요청 데이터 준비
       const requestData = {
         start_date: selectedPeriod.start.format('YYYY-MM-DD'),

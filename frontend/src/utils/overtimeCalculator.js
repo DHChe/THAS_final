@@ -1,5 +1,28 @@
 import HolidayKr from 'holiday-kr';
 
+// 24:00:00 형식의 시간을 다음날 00:00:00으로 변환하는 유틸리티 함수
+function processTimeString(timeStr) {
+  if (!timeStr) return timeStr;
+  
+  // 24:00:00 형식 감지
+  if (timeStr.includes(' 24:00:00')) {
+    // 날짜와 시간 부분 분리
+    const [datePart] = timeStr.split(' ');
+    
+    // 날짜를 Date 객체로 변환
+    const date = new Date(datePart);
+    
+    // 하루 추가
+    date.setDate(date.getDate() + 1);
+    
+    // 다음날 00:00:00 형식으로 반환
+    const nextDay = date.toISOString().split('T')[0];
+    return `${nextDay} 00:00:00`;
+  }
+  
+  return timeStr;
+}
+
 export class OvertimeCalculator {
   constructor(startDate, endDate) {
     this.startDate = new Date(startDate);
@@ -21,6 +44,9 @@ export class OvertimeCalculator {
   }
 
   calculateWorkHours(checkIn, checkOut) {
+    // 24:00:00 형식 처리
+    checkOut = processTimeString(checkOut);
+    
     const start = new Date(checkIn);
     const end = new Date(checkOut);
 
@@ -235,6 +261,9 @@ export class OvertimeCalculator {
     attendanceRecords.forEach(record => {
       if (!['정상', '지각'].includes(record.attendance_type)) return;
       
+      // 24:00:00 형식 처리
+      record.check_out = processTimeString(record.check_out);
+      
       const start = new Date(record.check_in);
       const end = new Date(record.check_out);
       
@@ -270,6 +299,9 @@ export class OvertimeCalculator {
     let totalNightHours = 0;
     
     attendanceRecords.forEach(record => {
+      // 24:00:00 형식 처리
+      record.check_out = processTimeString(record.check_out);
+      
       const start = new Date(record.check_in);
       const end = new Date(record.check_out);
       
@@ -322,6 +354,9 @@ export class OvertimeCalculator {
       return 0;
     }
 
+    // 24:00:00 형식 처리
+    record.check_out = processTimeString(record.check_out);
+    
     const checkIn = new Date(record.check_in);
     const checkOut = new Date(record.check_out);
     

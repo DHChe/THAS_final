@@ -4,10 +4,11 @@ import pandas as pd
 import os
 import json
 import logging
-from datetime import datetime
+from datetime import datetime, timedelta
 import sys
 from flask_socketio import SocketIO, emit
 import threading
+import time
 
 # 로깅 설정
 logging.basicConfig(
@@ -869,33 +870,38 @@ def sync_attendance_file():
     강제로 근태 파일(attendance.csv)을 데이터베이스와 동기화합니다.
     """
     try:
-        # 동기화 시도 (강제 실행)
-        sync_result = (
-            payroll_service.sync_attendance_if_changed()
-            or payroll_service.sync_attendance_if_changed()
-        )
+        # 동기화 전 파일 해시값 저장
+        initial_hash = payroll_service._calculate_file_hash()
 
-        if sync_result:
-            return jsonify(
-                {
-                    "status": "success",
-                    "message": "근태 파일이 데이터베이스와 성공적으로 동기화되었습니다.",
-                    "last_modified": datetime.fromtimestamp(
-                        payroll_service.attendance_file_last_modified
-                    ).strftime("%Y-%m-%d %H:%M:%S"),
-                }
-            )
-        else:
-            return jsonify(
-                {
-                    "status": "warning",
-                    "message": "근태 파일에 변경 사항이 없거나 동기화할 데이터가 없습니다.",
-                    "last_modified": datetime.fromtimestamp(
-                        payroll_service.attendance_file_last_modified
-                    ).strftime("%Y-%m-%d %H:%M:%S"),
-                }
-            )
+        # 동기화 시도 (강제 실행)
+        sync_result = payroll_service.sync_attendance_if_changed()
+
+        # 첫 번째 시도에서 변경 사항이 없어도 한 번 더 시도
+        if not sync_result:
+            # 파일 해시 강제 초기화하여 변경 사항이 있는 것처럼 만듦
+            payroll_service.attendance_file_hash = "forced_resync_" + str(time.time())
+            sync_result = payroll_service.sync_attendance_if_changed()
+
+        # 동기화 후 해시값
+        final_hash = payroll_service._calculate_file_hash()
+
+        # 변경 사항이 없어도 성공으로 간주 (이미 동기화되어 있는 상태)
+        return jsonify(
+            {
+                "status": "success",
+                "message": (
+                    "근태 파일이 데이터베이스와 성공적으로 동기화되었습니다."
+                    if sync_result
+                    else "근태 데이터가 이미 최신 상태입니다."
+                ),
+                "hash_changed": initial_hash != final_hash,
+                "last_modified": datetime.fromtimestamp(
+                    payroll_service.attendance_file_last_modified
+                ).strftime("%Y-%m-%d %H:%M:%S"),
+            }
+        )
     except Exception as e:
+        logger.error(f"근태 파일 동기화 오류: {str(e)}")
         return (
             jsonify(
                 {
@@ -1063,6 +1069,40 @@ def sync_attendance_csv():
         return jsonify({"error": f"CSV 파일 처리 중 오류 발생: {str(e)}"}), 500
 
 
+def process_time_string(time_str):
+    """
+    24:00:00 형식의 시간을 다음날 00:00:00으로 변환하는 함수
+
+    Parameters:
+    -----------
+    time_str : str
+        처리할 시간 문자열 (형식: YYYY-MM-DD HH:MM:SS)
+
+    Returns:
+    --------
+    str
+        변환된 시간 문자열
+    """
+    if not time_str:
+        return time_str
+
+    # 24:00:00 형식 감지
+    if " 24:00:00" in time_str:
+        # 날짜와 시간 부분 분리
+        date_part, _ = time_str.split(" ")
+
+        # 날짜를 datetime 객체로 변환
+        date_obj = datetime.strptime(date_part, "%Y-%m-%d")
+
+        # 하루 추가
+        next_day = date_obj + timedelta(days=1)
+
+        # 다음날 00:00:00 형식으로 반환
+        return next_day.strftime("%Y-%m-%d") + " 00:00:00"
+
+    return time_str
+
+
 # 근태 데이터 업데이트 API 엔드포인트
 @app.route("/api/attendance/update", methods=["POST"])
 def update_attendance():
@@ -1107,6 +1147,10 @@ def update_attendance():
                 except ValueError:
                     print(f"날짜 형식 오류: {date_str}")
                     continue
+
+                # 24:00:00 형식 처리 - 퇴근시간
+                if "check_out" in record and record["check_out"]:
+                    record["check_out"] = process_time_string(record["check_out"])
 
                 # 해당 직원과 날짜에 맞는 근태 기록 조회
                 attendance = (

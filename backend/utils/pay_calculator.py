@@ -10,6 +10,41 @@ REGULAR_WORKDAY_START = 9  # 일반 근로일 근무 시작 시간 (09:00)
 REGULAR_WORKDAY_END = 18  # 일반 근로일 근무 종료 시간 (18:00)
 
 
+# 시간 문자열 처리를 위한 유틸리티 함수 추가
+def process_time_string(time_str):
+    """
+    24:00:00 형식의 시간을 다음날 00:00:00으로 변환하는 함수
+
+    Parameters:
+    -----------
+    time_str : str
+        처리할 시간 문자열 (형식: YYYY-MM-DD HH:MM:SS)
+
+    Returns:
+    --------
+    str
+        변환된 시간 문자열
+    """
+    if not time_str:
+        return time_str
+
+    # 24:00:00 형식 감지
+    if " 24:00:00" in time_str:
+        # 날짜와 시간 부분 분리
+        date_part, _ = time_str.split(" ")
+
+        # 날짜를 datetime 객체로 변환
+        date_obj = datetime.strptime(date_part, "%Y-%m-%d")
+
+        # 하루 추가
+        next_day = date_obj + timedelta(days=1)
+
+        # 다음날 00:00:00 형식으로 반환
+        return next_day.strftime("%Y-%m-%d") + " 00:00:00"
+
+    return time_str
+
+
 class PayCalculator:
     def __init__(
         self,
@@ -176,6 +211,9 @@ class PayCalculator:
             if not record["check_in"] or not record["check_out"]:
                 continue
 
+            # 24:00:00 형식 처리
+            record["check_out"] = process_time_string(record["check_out"])
+
             check_in_dt = datetime.strptime(record["check_in"], "%Y-%m-%d %H:%M:%S")
             check_out_dt = datetime.strptime(record["check_out"], "%Y-%m-%d %H:%M:%S")
 
@@ -189,11 +227,12 @@ class PayCalculator:
                 # ===== 첫째 날 처리 =====
                 if first_day_is_holiday:
                     # 휴일인 경우 모든 시간이 연장근로
-                    first_day_end = datetime.combine(
-                        check_in_dt.date(), time(23, 59, 59)
+                    # 23:59:59 대신 다음날 00:00:00을 사용하여 정확한 계산
+                    next_day_start = datetime.combine(
+                        check_in_dt.date() + timedelta(days=1), time(0, 0, 0)
                     )
                     first_day_hours = (
-                        first_day_end - check_in_dt
+                        next_day_start - check_in_dt
                     ).total_seconds() / 3600
 
                     # 9시간 이상 근무 시 휴게시간 1시간 제외
@@ -203,8 +242,9 @@ class PayCalculator:
                     total_overtime_pay += first_day_hours * hourly_rate * 1.5
                 else:
                     # 평일인 경우 소정근로시간(9:00~18:00) 외 시간만 연장근로
-                    first_day_end = datetime.combine(
-                        check_in_dt.date(), time(23, 59, 59)
+                    # 23:59:59 대신 다음날 00:00:00을 사용하여 정확한 계산
+                    next_day_start = datetime.combine(
+                        check_in_dt.date() + timedelta(days=1), time(0, 0, 0)
                     )
                     workday_start = datetime.combine(
                         check_in_dt.date(), time(REGULAR_WORKDAY_START, 0, 0)
@@ -221,7 +261,7 @@ class PayCalculator:
                         total_overtime_pay += early_hours * hourly_rate * 1.5
 
                     # 18:00 이후 근무 시간 (연장근로)
-                    late_hours = (first_day_end - workday_end).total_seconds() / 3600
+                    late_hours = (next_day_start - workday_end).total_seconds() / 3600
                     total_overtime_pay += late_hours * hourly_rate * 1.5
 
                 # ===== 둘째 날부터 처리 =====
@@ -238,8 +278,9 @@ class PayCalculator:
                         # 마지막 날
                         day_end = check_out_dt
                     else:
-                        # 중간 날짜
-                        day_end = datetime.combine(current_date, time(23, 59, 59))
+                        # 중간 날짜 - 23:59:59 대신 다음날 00:00:00 사용
+                        next_day = current_date + timedelta(days=1)
+                        day_end = datetime.combine(next_day, time(0, 0, 0))
 
                     day_start = datetime.combine(current_date, time(0, 0, 0))
 
@@ -325,6 +366,10 @@ class PayCalculator:
         """
         if not check_in or not check_out:
             return 0
+
+        # 24:00:00 형식 처리
+        check_out = process_time_string(check_out)
+
         check_in_dt = datetime.strptime(check_in, "%Y-%m-%d %H:%M:%S")
         check_out_dt = datetime.strptime(check_out, "%Y-%m-%d %H:%M:%S")
         total_hours = (check_out_dt - check_in_dt).total_seconds() / 3600
@@ -346,6 +391,9 @@ class PayCalculator:
             # 출퇴근 시간이 없으면 건너뛰기
             if not record["check_in"] or not record["check_out"]:
                 continue
+
+            # 24:00:00 형식 처리
+            record["check_out"] = process_time_string(record["check_out"])
 
             check_in_dt = datetime.strptime(record["check_in"], "%Y-%m-%d %H:%M:%S")
             check_out_dt = datetime.strptime(record["check_out"], "%Y-%m-%d %H:%M:%S")
@@ -386,6 +434,10 @@ class PayCalculator:
         """
         if not check_in or not check_out:
             return 0
+
+        # 24:00:00 형식 처리
+        check_out = process_time_string(check_out)
+
         check_in_dt = datetime.strptime(check_in, "%Y-%m-%d %H:%M:%S")
         check_out_dt = datetime.strptime(check_out, "%Y-%m-%d %H:%M:%S")
         night_start = datetime.combine(check_in_dt.date(), time(22, 0))
@@ -419,8 +471,17 @@ class PayCalculator:
         total_holiday_pay = 0
 
         for record in attendance_data:
+            # 휴일 근무가 아니거나 출퇴근 시간이 없으면 건너뛰기
+            if not (
+                record["attendance_type"] == "휴일"
+                or self._is_holiday(record["check_in"].split(" ")[0])
+            ):
+                continue
             if not record["check_in"] or not record["check_out"]:
                 continue
+
+            # 24:00:00 형식 처리
+            record["check_out"] = process_time_string(record["check_out"])
 
             check_in_dt = datetime.strptime(record["check_in"], "%Y-%m-%d %H:%M:%S")
             check_out_dt = datetime.strptime(record["check_out"], "%Y-%m-%d %H:%M:%S")

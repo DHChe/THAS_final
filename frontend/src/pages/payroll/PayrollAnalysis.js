@@ -196,236 +196,119 @@ const PayrollAnalysis = () => {
 
   // 데이터 로딩
   const loadData = async () => {
+    setIsLoading(true);
     try {
-      setDataState({
-        isLoading: true,
-        isError: false,
-        errorMessage: ''
+      const token = localStorage.getItem('token');
+      if (!token) {
+        throw new Error('인증 토큰이 없습니다. 다시 로그인해주세요.');
+      }
+
+      // 직원 목록 로드
+      const employeesResponse = await fetch('http://localhost:5000/api/employees', {
+        headers: {
+          'Authorization': `Bearer ${token}`
+        }
       });
       
-      // 직원 데이터 로드 - 프록시 사용
-      console.log('직원 데이터 요청 시작');
-      const employeesResponse = await fetch('/api/employees');
       if (!employeesResponse.ok) {
-        throw new Error(`직원 데이터 로딩 실패: ${employeesResponse.status}`);
+        throw new Error('직원 목록을 불러오는데 실패했습니다.');
       }
-      const employees = await employeesResponse.json();
-      console.log('직원 데이터 로드 완료:', employees.length, '명');
+      const employeesData = await employeesResponse.json();
+      console.log('직원 데이터 로드:', employeesData.length, '명'); // 디버깅용 로그
+      setEmployeesData(employeesData);
+
+      // 급여 데이터 로드
+      const payrollResponse = await fetch('http://localhost:5000/api/payroll/records', {
+        headers: {
+          'Authorization': `Bearer ${token}`
+        }
+      });
       
-      // 확정된 급여 데이터만 로드 (confirmed 또는 paid 상태) - 프록시 사용
-      console.log('급여 데이터 요청 시작');
-      const payrollResponse = await fetch('/api/payroll/records?status=confirmed,paid');
       if (!payrollResponse.ok) {
-        throw new Error(`급여 데이터 로딩 실패: ${payrollResponse.status} ${payrollResponse.statusText}`);
+        throw new Error('급여 데이터를 불러오는데 실패했습니다.');
       }
       
       const payrollData = await payrollResponse.json();
-      console.log('급여 데이터 로드 완료:', payrollData.length, '건');
+      console.log('급여 데이터 로드:', payrollData.length, '건'); // 디버깅용 로그
       
-      // 데이터가 비어있는 경우 처리
-      if (payrollData.length === 0) {
-        setAlert({
-          open: true,
-          message: '확정된 급여 데이터가 없습니다. 먼저 급여를 계산하고 확정해주세요.',
-          severity: 'warning'
-        });
-        return;
-      }
+      // 확정된 급여 데이터만 필터링
+      const confirmedPayrolls = payrollData.filter(record => 
+        record.status === 'confirmed' || record.status === 'paid'
+      );
+      console.log('확정된 급여 데이터:', confirmedPayrolls.length, '건'); // 디버깅용 로그
       
-      // 급여 데이터 처리 및 태그 부여
-      console.log('급여 데이터 처리 시작');
+      setPayrollData(confirmedPayrolls);
       
-      // 원본 데이터 로그
-      console.log('처리할 급여 데이터 예시:', payrollData.length > 0 ? payrollData[0] : '데이터 없음');
-      
-      const processedPayrollData = payrollData.map((payroll, index) => {
-        try {
-          // 계산 기간 설정
-          const start = payroll.payment_period_start;
-          const end = payroll.payment_period_end;
-          
-          // 처리 중인 데이터 로그 (첫 5개만)
-          if (index < 5) {
-            console.log(`급여 기록 #${index+1} 처리:`, {
-              id: payroll.payroll_id,
-              employee: payroll.employee_name,
-              start,
-              end,
-              payment_date: payroll.payment_date
-            });
-          }
-          
-          // 급여 태그 부여 (정기, 입사, 퇴사, 기타)
-          let tag = '정기급여';
-          
-          // 가공된 데이터 생성
-          const processedItem = {
-            ...payroll,
-            calculation_period_start: start,
-            calculation_period_end: end,
-            payroll_tag: tag,
-          };
-          
-          // 제목 생성
-          processedItem.period_title = generatePayrollPeriodTitle(
-            start, 
-            end, 
-            tag, 
-            {
-              name: payroll.employee_name || '이름 없음',
-              department: payroll.department || '부서 없음',
-              position: payroll.position || '직책 없음'
-            }
-          );
-          
-          return processedItem;
-        } catch (error) {
-          console.error(`급여 데이터 #${index+1} 처리 오류:`, error);
-          // 오류 발생 시 원본 데이터에 오류 표시 추가
-          return {
-            ...payroll,
-            period_title: '데이터 처리 오류',
-            payroll_tag: '오류',
-            calculation_period_start: payroll.payment_period_start || dayjs().format('YYYY-MM-DD'),
-            calculation_period_end: payroll.payment_period_end || dayjs().format('YYYY-MM-DD'),
-            error: error.message
-          };
-        }
-      });
-      
-      // 가공된 데이터 로그
-      console.log('처리된 급여 데이터 예시:', processedPayrollData.length > 0 ? processedPayrollData[0] : '데이터 없음');
-      console.log('급여 데이터 처리 완료');
-      
-      // 급여 기간 목록 생성 (중복 제거)
-      const periods = processedPayrollData.map(p => ({
-        id: `${p.payment_date}-${p.payroll_tag}`,
-        title: p.period_title,
-        start_date: p.calculation_period_start,
-        end_date: p.calculation_period_end,
-        payment_date: p.payment_date,
-        tag: p.payroll_tag
-      }));
-      
-      // 중복 제거를 위한 Set 사용
-      const uniquePeriods = Array.from(
-        new Set(periods.map(p => p.id))
-      ).map(id => periods.find(p => p.id === id));
-      
-      // 가장 최근 지급일 기준으로 정렬
-      uniquePeriods.sort((a, b) => new Date(b.payment_date) - new Date(a.payment_date));
-      
-      setEmployeesData(employees);
-      setPayrollData(processedPayrollData);
-      setPayrollPeriods(uniquePeriods);
-      
-      // 초기 필터링 적용을 위해 최신 급여 기간 선택
-      if (uniquePeriods.length > 0) {
-        setSelectedPayrollPeriods([uniquePeriods[0].id]);
-      }
-
-      if (processedPayrollData.length > 0) {
-        try {
-          // 날짜 범위 설정
-          console.log('날짜 범위 설정 시작');
-          
-          const paymentDates = processedPayrollData
-            .filter(p => p.payment_date) // null, undefined 제거
-            .map(p => {
-              const date = dayjs(p.payment_date);
-              console.log(`날짜 변환: ${p.payment_date} -> ${date.isValid() ? date.format('YYYY-MM-DD') : '유효하지 않음'}`);
-              return date;
-            })
-            .filter(date => date.isValid()); // 유효하지 않은 날짜 제거
-          
-          console.log(`변환된 유효한 날짜 수: ${paymentDates.length}`);
-          
-          // 유효한 날짜가 있는 경우에만 max/min 계산
-          if (paymentDates.length > 0) {
-            // max/min을 직접 계산하는 대신 배열을 정렬하여 찾기
-            paymentDates.sort((a, b) => b.valueOf() - a.valueOf()); // 내림차순 정렬
-            
-            const latestDate = paymentDates[0]; // 첫 번째 값이 가장 최근 날짜
-            const earliestDate = paymentDates[paymentDates.length - 1]; // 마지막 값이 가장 오래된 날짜
-            
-            console.log(`최근 날짜: ${latestDate.format('YYYY-MM-DD')}, 가장 오래된 날짜: ${earliestDate.format('YYYY-MM-DD')}`);
-            
-            setMaxDate(latestDate);
-            setMinDate(earliestDate);
-            
-            // 기본적으로 최신 날짜를 선택
-            setStartDate(latestDate.subtract(1, 'month'));
-            setEndDate(latestDate);
-            
-            // 가장 최근 급여 데이터의 연/월을 기본 필터로 설정
-            setPaymentDateFilter({
-              year: latestDate.year(),
-              month: latestDate.month() + 1
-            });
-          } else {
-            // 유효한 날짜가 없는 경우 현재 날짜로 설정
-            const currentDate = dayjs();
-            setMaxDate(currentDate);
-            setMinDate(currentDate.subtract(1, 'year'));
-            setStartDate(currentDate.subtract(1, 'month'));
-            setEndDate(currentDate);
-            setPaymentDateFilter({
-              year: currentDate.year(),
-              month: currentDate.month() + 1
-            });
-          }
-        } catch (error) {
-          console.error('날짜 범위 설정 중 오류:', error);
-          setAlert({
-            open: true,
-            message: '날짜 범위 설정 중 오류가 발생했습니다.',
-            severity: 'error'
-          });
-          
-          // 오류 발생 시 현재 날짜로 기본값 설정
-          const currentDate = dayjs();
-          setMaxDate(currentDate);
-          setMinDate(currentDate.subtract(1, 'year'));
-          setStartDate(currentDate.subtract(1, 'month'));
-          setEndDate(currentDate);
-          setPaymentDateFilter({
-            year: currentDate.year(),
-            month: currentDate.month() + 1
-          });
-        }
-      } else {
-        // 데이터가 없는 경우 현재 날짜 기준으로 설정
-        const currentDate = dayjs();
-        setMaxDate(currentDate);
-        setMinDate(currentDate.subtract(1, 'year'));
-        setStartDate(currentDate.subtract(1, 'month'));
-        setEndDate(currentDate);
-        setPaymentDateFilter({
-          year: currentDate.year(),
-          month: currentDate.month() + 1
-        });
-      }
-      
-      // 필터링 적용
-      applyFilters(processedPayrollData);
-      
+      // 필터 적용
+      applyFilters(confirmedPayrolls);
     } catch (error) {
-      console.error('데이터 로딩 상세 에러:', error);
-      setAlert({
-        open: true,
-        message: '급여 데이터 로드 중 오류가 발생했습니다.' + (error.message ? ' - ' + error.message : ''),
-        severity: 'error'
-      });
+      console.error('데이터 로딩 오류:', error);
       setDataState({
         isLoading: false,
         isError: true,
         errorMessage: error.message
       });
+      setAlert({
+        open: true,
+        message: error.message || '데이터 로딩 중 오류가 발생했습니다.',
+        severity: 'error'
+      });
     } finally {
-      setDataState(prev => ({...prev, isLoading: false}));
+      setIsLoading(false);
     }
   };
-  
+
+  const applyFilters = (data) => {
+    let filteredData = [...data];
+
+    // 기간 필터
+    if (startDate && endDate) {
+      filteredData = filteredData.filter(record => {
+        const recordStart = new Date(record.payment_period_start);
+        const recordEnd = new Date(record.payment_period_end);
+        return recordStart >= startDate && recordEnd <= endDate;
+      });
+    }
+
+    // 직원 필터
+    if (nameQuery) {
+      filteredData = filteredData.filter(record =>
+        employeesData.find(emp => emp.employee_id === record.employee_id)?.name?.toLowerCase().includes(nameQuery.toLowerCase())
+      );
+    }
+
+    // 부서 필터
+    if (Object.values(departments).some(val => val === true) && !departments['전체']) {
+      filteredData = filteredData.filter(record =>
+        employeesData.find(emp => emp.employee_id === record.employee_id)?.department?.trim() === Object.keys(departments).find(dept => departments[dept])
+      );
+    }
+
+    // 직급 필터
+    if (Object.values(positions).some(val => val === true) && !positions['전체']) {
+      filteredData = filteredData.filter(record =>
+        employeesData.find(emp => emp.employee_id === record.employee_id)?.position?.trim() === Object.keys(positions).find(pos => positions[pos])
+      );
+    }
+
+    // 태그 필터
+    filteredData = filteredData.filter(record => payrollTags[record.payroll_tag] === true);
+
+    // 지급일 필터
+    if (paymentDateFilter.year && paymentDateFilter.month) {
+      filteredData = filteredData.filter(record => {
+        if (!record.payment_date) return false;
+        const paymentDate = dayjs(record.payment_date);
+        return paymentDate.isValid() && 
+               paymentDate.year() === paymentDateFilter.year && 
+               paymentDate.month() + 1 === paymentDateFilter.month;
+      });
+    }
+
+    setFilteredData(filteredData);
+    setPage(0); // 페이지 리셋
+  };
+
   // 급여 기간 제목 생성 함수
   const generatePayrollPeriodTitle = (startDate, endDate, tag, employee) => {
     console.log('제목 생성 입력값:', startDate, endDate, tag, employee);
@@ -468,86 +351,10 @@ const PayrollAnalysis = () => {
     return periodTitle;
   };
 
-  // 급여 필터링 로직
-  const applyFilters = useCallback((dataToFilter = payrollData) => {
-    if (!dataToFilter.length) return;
-    
-    let result = [...dataToFilter];
-    
-    // 1. 급여 기록 중심 필터링: 선택된 급여 기간으로 필터링
-    if (selectedPayrollPeriods.length > 0) {
-      result = result.filter(record => {
-        const recordPeriodId = `${record.payment_date}-${record.payroll_tag}`;
-        return selectedPayrollPeriods.includes(recordPeriodId);
-      });
-    }
-    
-    // 2. 태그 시스템 기반 필터링
-    result = result.filter(record => payrollTags[record.payroll_tag] === true);
-    
-    // 3. 지급일 기준 필터링 (연/월)
-    if (paymentDateFilter.year && paymentDateFilter.month) {
-      result = result.filter(record => {
-        if (!record.payment_date) return false;
-        const paymentDate = dayjs(record.payment_date);
-        return paymentDate.isValid() && 
-               paymentDate.year() === paymentDateFilter.year && 
-               paymentDate.month() + 1 === paymentDateFilter.month;
-      });
-    }
-    
-    // 4. 기존 필터 유지 (이름, 부서, 직급 등)
-    // 이름 검색 필터
-    if (nameQuery) {
-      result = result.filter(record => {
-        const employee = employeesData.find(emp => emp.employee_id === record.employee_id) || {};
-        return employee.name?.toLowerCase().includes(nameQuery.toLowerCase());
-      });
-    }
-
-    // 부서 필터
-    if (Object.values(departments).some(val => val === true) && !departments['전체']) {
-      result = result.filter(record => {
-        const employee = employeesData.find(emp => emp.employee_id === record.employee_id) || {};
-        // 부서명에서 불필요한 공백 제거 후 비교
-        const dept = employee.department?.trim();
-        return dept && departments[dept];
-      });
-    }
-
-    // 직급 필터
-    if (Object.values(positions).some(val => val === true) && !positions['전체']) {
-      result = result.filter(record => {
-        const employee = employeesData.find(emp => emp.employee_id === record.employee_id) || {};
-        // 직급명에서 불필요한 공백 제거 후 비교
-        const pos = employee.position?.trim();
-        return pos && positions[pos];
-      });
-    }
-
-    // 날짜 범위 필터 (기간 기준)
-    if (startDate && endDate) {
-      const start = dayjs(startDate).startOf('day');
-      const end = dayjs(endDate).endOf('day');
-      
-      result = result.filter(record => {
-        if (!record.payment_date) return false;
-        const paymentDate = dayjs(record.payment_date);
-        return paymentDate.isValid() && (
-          (paymentDate.isAfter(start) || paymentDate.isSame(start)) && 
-          (paymentDate.isBefore(end) || paymentDate.isSame(end))
-        );
-      });
-    }
-    
-    setFilteredData(result);
-    setPage(0); // 페이지 리셋
-  }, [payrollData, nameQuery, departments, positions, startDate, endDate, selectedPayrollPeriods, payrollTags, paymentDateFilter, employeesData]);
-
   // 엔드포인트에서 가져온 데이터에 필터 적용
   useEffect(() => {
-    applyFilters();
-  }, [applyFilters]);
+    applyFilters(payrollData);
+  }, [payrollData, startDate, endDate, nameQuery, departments, positions, paymentDateFilter, employeesData]);
 
   // 데이터 로드
   useEffect(() => {
@@ -785,13 +592,12 @@ const PayrollAnalysis = () => {
   return (
     <ThemeProvider theme={theme}>
       <Box sx={commonStyles.pageContainer}>
-        <GlobalTabs />
         <Container maxWidth="xl" sx={{ mt: 4, mb: 4 }}>
-          <Typography variant="h4" sx={{ fontWeight: 600, color: theme.palette.text.primary }}>
-            급여 분석
+          <Typography variant="h4" gutterBottom sx={{ fontWeight: 600, color: theme.palette.text.primary }}>
+            임금 분석
           </Typography>
-          <Typography variant="body1" sx={{ color: theme.palette.text.secondary, mb: 4 }}>
-            지급된 급여 데이터를 분석하고 검색합니다.
+          <Typography variant="body1" sx={{ mb: 4, color: theme.palette.text.secondary }}>
+            확정된 임금 데이터를 분석하고, AI 기반 인사이트를 제공합니다.
           </Typography>
 
           {dataState.isLoading && (
@@ -992,7 +798,7 @@ const PayrollAnalysis = () => {
                     color="primary"
                     fullWidth
                     sx={{ mt: 3 }}
-                    onClick={() => applyFilters()}
+                    onClick={() => applyFilters(payrollData)}
                   >
                     필터 적용 & 검색
                   </Button>

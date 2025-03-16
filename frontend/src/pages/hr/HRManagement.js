@@ -16,7 +16,6 @@ import {
   TrendingUp, // 생산성 지표
   School // 인재 개발
 } from '@mui/icons-material';
-import GlobalTabs from '../../components/GlobalTabs';
 
 /**
  * 인사 관리 메인 페이지
@@ -33,7 +32,6 @@ const HRManagement = () => {
         color: '#fff'
       }}
     >
-      <GlobalTabs />
       <Container maxWidth="xl" sx={{ mt: 4, mb: 4 }}>
         {/* Quick Stats 대시보드 */}
         <Grid container spacing={3}>

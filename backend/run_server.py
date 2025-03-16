@@ -37,6 +37,9 @@ from models.models import (
 from app.services.payroll_service import PayrollService, FILE_CHANGED_EVENT
 from config import Config
 
+# 새로 추가: 인증 라우트 임포트
+from app.routes.auth import auth_bp
+
 # PayrollService 객체 초기화
 payroll_service = PayrollService(Config)
 
@@ -44,9 +47,47 @@ app = Flask(__name__)
 CORS(
     app,
     resources={
-        r"/api/*": {"origins": ["http://localhost:3001", "http://localhost:3000"]}
+        r"/*": {
+            "origins": ["http://localhost:3001", "http://localhost:3000"],
+            "methods": ["GET", "POST", "PUT", "DELETE", "OPTIONS"],
+            "allow_headers": [
+                "Content-Type",
+                "Authorization",
+                "Accept",
+                "Cache-Control",
+                "Expires",
+                "Pragma",
+            ],
+            "supports_credentials": True,
+            "expose_headers": ["Content-Type", "Authorization"],
+            "max_age": 3600,
+        }
     },
+    supports_credentials=True,
 )
+
+# 인증 라우트 등록
+app.register_blueprint(auth_bp, url_prefix="/api/auth")
+
+
+# health 엔드포인트 직접 추가
+@app.route("/api/health", methods=["GET"])
+def health_check():
+    """서버 상태 확인 엔드포인트"""
+    from datetime import datetime
+
+    return (
+        jsonify(
+            {
+                "status": "healthy",
+                "timestamp": datetime.now().isoformat(),
+                "service": "THAS Backend",
+            }
+        ),
+        200,
+    )
+
+
 # SocketIO 초기화
 socketio = SocketIO(
     app,
@@ -54,8 +95,8 @@ socketio = SocketIO(
     async_mode="threading",  # 쓰레딩 모드 사용
     ping_timeout=30,  # 핑 타임아웃 시간 증가
     ping_interval=15,  # 핑 간격 조정
-    logger=True,  # 로깅 활성화
-    engineio_logger=True,  # Engine.IO 로깅 활성화
+    logger=False,  # 로깅 비활성화 (True → False로 변경)
+    engineio_logger=False,  # Engine.IO 로깅 비활성화 (True → False로 변경)
     always_connect=True,  # 항상 연결 시도
     max_http_buffer_size=10e6,  # 버퍼 크기 증가
 )
@@ -2040,3 +2081,145 @@ if __name__ == "__main__":
         socketio.run(app, host="0.0.0.0", port=5000, debug=True)
     except Exception as e:
         logger.error(f"서버 시작 오류: {str(e)}")
+
+
+# 새로 추가: 기존 확정 급여 데이터 확인 API 엔드포인트
+@app.route("/api/payroll/check-existing", methods=["POST", "OPTIONS"])
+def check_existing_payrolls():
+    """
+    특정 기간과 직원에 대해 이미 확정된 급여 데이터가 있는지 확인하는 API
+
+    요청 형식:
+    {
+        "start_date": "YYYY-MM-DD",
+        "end_date": "YYYY-MM-DD",
+        "employee_ids": [직원ID 목록]
+    }
+
+    응답 형식:
+    {
+        "exists": true/false,
+        "data": [확정된 급여 데이터 목록]
+    }
+    """
+    # CORS preflight 요청 처리
+    if request.method == "OPTIONS":
+        return jsonify({"message": "Preflight request successful"}), 200
+
+    try:
+        data = request.json
+        start_date = data.get("start_date")
+        end_date = data.get("end_date")
+        employee_ids = data.get("employee_ids", [])
+
+        if not start_date or not end_date:
+            return jsonify({"error": "시작일과 종료일은 필수입니다."}), 400
+
+        # 날짜 형식 변환
+        period_start = datetime.strptime(start_date, "%Y-%m-%d").date()
+        period_end = datetime.strptime(end_date, "%Y-%m-%d").date()
+
+        # 세션 생성
+        session = get_db_session()
+        try:
+            # 이미 확정된 급여 데이터 확인
+            existing_payrolls = []
+
+            for employee_id in employee_ids:
+                # 중복 검사 함수 사용
+                overlaps = payroll_service.check_overlapping_periods(
+                    employee_id, period_start, period_end, "regular"
+                )
+
+                if overlaps:
+                    existing_payrolls.extend(overlaps)
+
+            # 중복 데이터가 있는지 여부 반환
+            return jsonify(
+                {"exists": len(existing_payrolls) > 0, "data": existing_payrolls}
+            )
+        finally:
+            session.close()
+    except Exception as e:
+        return (
+            jsonify(
+                {"error": f"기존 급여 데이터 확인 중 오류가 발생했습니다: {str(e)}"}
+            ),
+            500,
+        )
+
+
+@app.route("/api/attendance/records", methods=["POST", "OPTIONS"])
+def get_attendance_records():
+    """
+    근태 데이터 조회 API 엔드포인트
+
+    요청 형식:
+    {
+        "employee_ids": [직원ID 목록],
+        "start_date": "YYYY-MM-DD",
+        "end_date": "YYYY-MM-DD"
+    }
+
+    응답 형식:
+    {
+        "data": [근태 데이터 목록]
+    }
+    """
+    # CORS preflight 요청 처리
+    if request.method == "OPTIONS":
+        return jsonify({"message": "Preflight request successful"}), 200
+
+    try:
+        data = request.json
+        employee_ids = data.get("employee_ids", [])
+        start_date = data.get("start_date")
+        end_date = data.get("end_date")
+
+        if not start_date or not end_date:
+            return jsonify({"error": "시작일과 종료일은 필수입니다."}), 400
+
+        # 날짜 형식 변환
+        start_date = datetime.strptime(start_date, "%Y-%m-%d").date()
+        end_date = datetime.strptime(end_date, "%Y-%m-%d").date()
+
+        # 세션 생성
+        session = get_db_session()
+        try:
+            # 근태 데이터 조회
+            result = []
+
+            for employee_id in employee_ids:
+                # 해당 직원의 근태 기록 조회
+                attendance_records = (
+                    session.query(Attendance)
+                    .filter(
+                        Attendance.employee_id == employee_id,
+                        Attendance.date >= start_date,
+                        Attendance.date <= end_date,
+                    )
+                    .all()
+                )
+
+                # 응답 형식으로 변환
+                for record in attendance_records:
+                    result.append(
+                        {
+                            "id": record.id,
+                            "employee_id": record.employee_id,
+                            "date": record.date.strftime("%Y-%m-%d"),
+                            "check_in": record.check_in,
+                            "check_out": record.check_out,
+                            "attendance_type": record.attendance_type,
+                            "remarks": record.remarks,
+                        }
+                    )
+
+            return jsonify({"data": result})
+        finally:
+            session.close()
+    except Exception as e:
+        return (
+            jsonify({"error": f"근태 데이터 조회 중 오류가 발생했습니다: {str(e)}"}),
+            500,
+        )

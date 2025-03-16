@@ -19,12 +19,23 @@ def create_app():
     CORS(
         app,
         resources={
-            r"/api/*": {
+            r"/*": {
                 "origins": ["http://localhost:3000", "http://localhost:3001"],
-                "methods": ["GET", "POST", "OPTIONS"],
-                "allow_headers": ["Content-Type", "Authorization"],
+                "methods": ["GET", "POST", "PUT", "DELETE", "OPTIONS"],
+                "allow_headers": [
+                    "Content-Type",
+                    "Authorization",
+                    "Accept",
+                    "Cache-Control",
+                    "Expires",
+                    "Pragma",
+                ],
+                "supports_credentials": True,
+                "expose_headers": ["Content-Type", "Authorization"],
+                "max_age": 3600,
             }
         },
+        supports_credentials=True,
     )
 
     # 로깅 설정
@@ -55,11 +66,12 @@ def create_app():
     app.register_blueprint(health_bp)
 
     # API 블루프린트 등록
-    from app.routes import hr, attendance, payroll
+    from app.routes import hr, attendance, payroll, auth
 
     app.register_blueprint(hr.hr_bp, url_prefix="/api/hr")
     app.register_blueprint(attendance.attendance_bp, url_prefix="/api/attendance")
     app.register_blueprint(payroll.payroll_bp, url_prefix="/api/payroll")
+    app.register_blueprint(auth.auth_bp, url_prefix="/api/auth")
 
     # AI 라우트 등록
     app.register_blueprint(ai_bp, url_prefix="/api/ai")

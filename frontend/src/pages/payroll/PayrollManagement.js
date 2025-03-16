@@ -2,7 +2,6 @@ import React from 'react';
 import { Box, Typography, Container, Grid, CardContent } from '@mui/material';
 import { AccountBalance, QueryStats, Engineering, Settings, ArrowForward } from '@mui/icons-material';
 import { useNavigate } from 'react-router-dom';
-import GlobalTabs from '../../components/GlobalTabs'; // GlobalNavigation을 GlobalTabs로 변경
 import { StyledCard, StyledButton } from '../../components/StyledComponents';
 import { ThemeProvider } from '@mui/material/styles';
 import { CardActions } from '@mui/material';
@@ -14,15 +13,15 @@ const PayrollManagement = () => {
 
   const features = [
     {
-      title: "급여 지급관리",
-      description: "• 근태기록 기반 급여 계산\n• 급여명세서 생성 및 발송\n• 급여 지급 이력 관리",
+      title: "임금 지급관리",
+      description: "• 근태기록 기반 임금 계산\n• 임금명세서 생성 및 발송\n• 임금 지급 이력 관리",
       icon: <AccountBalance sx={{ fontSize: 40, color: theme.palette.primary.main }} />,
       path: "/payroll/payment",
       available: true
     },
     {
       title: "임금 관리 및 분석",
-      description: "• 기간별 급여 지급 내역 조회\n• AI 기반 분석 리포트 제공\n• 전체/부서/개인/직급별 데이터 분석",
+      description: "• 기간별 임금 지급 내역 조회\n• AI 기반 분석 리포트 제공\n• 전체/부서/개인/직급별 데이터 분석",
       icon: <QueryStats sx={{ fontSize: 40, color: theme.palette.primary.main }} />,
       path: "/payroll/analysis",
       available: true
@@ -46,14 +45,13 @@ const PayrollManagement = () => {
   return (
     <ThemeProvider theme={theme}>
       <Box sx={commonStyles.pageContainer}>
-        <GlobalTabs /> {/* GlobalNavigation을 GlobalTabs로 변경 */}
         <Container maxWidth="xl" sx={{ mt: 4, mb: 4 }}>
           <Box sx={{ mb: 6 }}>
             <Typography variant="h4" gutterBottom sx={{ fontWeight: 600, color: theme.palette.text.primary }}>
               임금 관리 시스템
             </Typography>
             <Typography variant="body1" sx={{ color: theme.palette.text.secondary }}>
-              급여 관리의 모든 프로세스를 효율적으로 관리하고 분석할 수 있는 통합 시스템입니다.
+              임금 관리의 모든 프로세스를 효율적으로 관리하고 분석할 수 있는 통합 시스템입니다.
             </Typography>
           </Box>
 

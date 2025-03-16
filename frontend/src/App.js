@@ -1,18 +1,41 @@
 import React from 'react';
-import { Routes, Route } from 'react-router-dom';
+import { Routes, Route, Navigate } from 'react-router-dom';
 import { ThemeProvider } from '@mui/material/styles';
-import CssBaseline from '@mui/material/CssBaseline';
+import { CssBaseline } from '@mui/material';
+import theme from './styles/theme';
+import GlobalTabs from './components/GlobalTabs';
 import Home from './pages/Home';
 import HRManagement from './pages/hr/HRManagement';
 import PayrollManagement from './pages/payroll/PayrollManagement';
-import PayrollAnalysis from './pages/payroll/PayrollAnalysis';
 import PayrollPayment from './pages/payroll/PayrollPayment';
+import PayrollAnalysis from './pages/payroll/PayrollAnalysis';
+import Login from './pages/login/Login';
 import './styles/fonts.css';
 import { GlobalStyles } from '@mui/material';
 import PerformanceMonitor from './components/monitoring/PerformanceMonitor';
 import { EmployeeProvider } from './context/EmployeeContext';
 import { globalStyles } from './styles/styles';
-import theme from './styles/theme';
+
+// 보호된 라우트 컴포넌트
+const ProtectedRoute = ({ children }) => {
+  const token = localStorage.getItem('token');
+  
+  if (!token) {
+    return <Navigate to="/" replace />;
+  }
+  
+  return children;
+};
+
+// 레이아웃 컴포넌트
+const Layout = ({ children }) => {
+  return (
+    <>
+      <GlobalTabs />
+      {children}
+    </>
+  );
+};
 
 function App() {
   return (
@@ -29,13 +52,55 @@ function App() {
       <CssBaseline />
       <EmployeeProvider>
         <Routes>
-          <Route path="/" element={<Home />} />
-          <Route path="/hr" element={<HRManagement />} />
-          <Route path="/payroll" element={<PayrollManagement />} />
-          <Route path="/payroll/payment" element={<PayrollPayment />} />
-          <Route path="/payroll/analysis" element={<PayrollAnalysis />} />
-          <Route path="/admin/monitoring" element={<PerformanceMonitor />} />
-          {/* 추가 라우트는 여기에 */}
+          {/* 로그인 페이지를 기본 경로로 설정 */}
+          <Route path="/" element={<Login />} />
+          
+          {/* 보호된 라우트들 */}
+          <Route path="/home" element={
+            <ProtectedRoute>
+              <Layout>
+                <Home />
+              </Layout>
+            </ProtectedRoute>
+          } />
+          
+          <Route path="/hr" element={
+            <ProtectedRoute>
+              <Layout>
+                <HRManagement />
+              </Layout>
+            </ProtectedRoute>
+          } />
+          
+          <Route path="/payroll/management" element={
+            <ProtectedRoute>
+              <Layout>
+                <PayrollManagement />
+              </Layout>
+            </ProtectedRoute>
+          } />
+          
+          <Route path="/payroll/payment" element={
+            <ProtectedRoute>
+              <Layout>
+                <PayrollPayment />
+              </Layout>
+            </ProtectedRoute>
+          } />
+          
+          <Route path="/payroll/analysis" element={
+            <ProtectedRoute>
+              <Layout>
+                <PayrollAnalysis />
+              </Layout>
+            </ProtectedRoute>
+          } />
+          
+          <Route path="/admin/monitoring" element={
+            <ProtectedRoute>
+              <PerformanceMonitor />
+            </ProtectedRoute>
+          } />
         </Routes>
       </EmployeeProvider>
     </ThemeProvider>

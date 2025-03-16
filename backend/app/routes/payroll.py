@@ -59,7 +59,7 @@ def get_current_month_payroll():
         return jsonify({"status": "error", "message": str(e)}), 500
 
 
-@payroll_bp.route("/confirm", methods=["POST"])
+@payroll_bp.route("/confirm", methods=["PUT"])
 @jwt_required()
 def confirm_payroll():
     """
@@ -70,54 +70,29 @@ def confirm_payroll():
     """
     try:
         data = request.json
-        payroll_data = data.get("payroll_data", [])
+        payroll_ids = data.get("payroll_ids", [])
+        remarks = data.get("remarks", "")
+        user_id = get_jwt_identity()
 
         with Session() as session:
             try:
                 confirmed_payrolls = []
 
-                for item in payroll_data:
-                    # payroll_code 생성 (날짜 + 일련번호)
-                    period_start = datetime.strptime(
-                        item["payment_period_start"], "%Y-%m-%d"
-                    ).date()
-                    year_month = period_start.strftime("%Y%m")
-
-                    # 이번 달 마지막 payroll_code 조회
-                    last_code = (
+                for payroll_code in payroll_ids:
+                    payroll = (
                         session.query(Payroll)
-                        .filter(Payroll.payroll_code.like(f"PR{year_month}%"))
-                        .order_by(Payroll.payroll_code.desc())
+                        .filter_by(payroll_code=payroll_code)
                         .first()
                     )
+                    if not payroll:
+                        continue
 
-                    if last_code:
-                        last_num = int(last_code.payroll_code[-3:])
-                        new_num = last_num + 1
-                    else:
-                        new_num = 1
+                    # 상태 업데이트
+                    payroll.status = "confirmed"
+                    payroll.confirmed_at = datetime.now()
+                    payroll.confirmed_by = user_id
+                    payroll.remarks = remarks
 
-                    payroll_code = f"PR{year_month}{new_num:03d}"
-
-                    # 새 Payroll 객체 생성 (id 필드는 자동 생성되도록 제외)
-                    payroll = Payroll(
-                        payroll_code=payroll_code,
-                        employee_id=item["employee_id"],
-                        payment_period_start=item["payment_period_start"],
-                        payment_period_end=item["payment_period_end"],
-                        base_pay=item["base_pay"],
-                        overtime_pay=item["overtime_pay"],
-                        holiday_pay=item["holiday_pay"],
-                        total_allowances=item["position_allowance"],
-                        gross_pay=item["total_pay"],
-                        total_deductions=0,  # 실제 공제 계산 로직 추가 필요
-                        net_pay=item["total_pay"],  # 공제 후 실제 지급액 계산 필요
-                        status="confirmed",
-                        confirmed_at=datetime.now(),
-                        confirmed_by="admin",  # 현재 로그인한 사용자 ID로 변경 필요
-                    )
-
-                    session.add(payroll)
                     confirmed_payrolls.append(payroll_code)
 
                 session.commit()
